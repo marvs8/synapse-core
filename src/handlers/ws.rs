@@ -15,6 +15,7 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::health::DependencySeverity;
 
 /// How often to send a ping frame to the client.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -282,4 +283,132 @@ async fn handle_client_message(
 
 fn validate_token(token: &str) -> bool {
     !token.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_token_empty() {
+        assert!(!validate_token(""));
+    }
+
+    #[test]
+    fn test_validate_token_valid() {
+        assert!(validate_token("valid_token_123"));
+    }
+
+    #[test]
+    fn test_validate_token_whitespace() {
+        assert!(validate_token(" "));
+    }
+
+    #[test]
+    fn test_heartbeat_interval_constant() {
+        assert_eq!(HEARTBEAT_INTERVAL, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_pong_timeout_constant() {
+        assert_eq!(PONG_TIMEOUT, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_resync_default_limit() {
+        assert_eq!(RESYNC_DEFAULT_LIMIT, 20);
+    }
+
+    #[test]
+    fn test_resync_max_limit() {
+        assert_eq!(RESYNC_MAX_LIMIT, 100);
+    }
+
+    #[test]
+    fn test_client_message_resync_deserialization() {
+        let json = r#"{"type": "resync", "limit": 50}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::Resync { limit } => {
+                assert_eq!(limit, Some(50));
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_message_resync_no_limit() {
+        let json = r#"{"type": "resync"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::Resync { limit } => {
+                assert_eq!(limit, None);
+            }
+        }
+    }
+
+    #[test]
+    fn test_server_message_messages_dropped_serialization() {
+        let msg = ServerMessage::MessagesDropped { count: 42 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("messages_dropped"));
+        assert!(json.contains("42"));
+    }
+
+    #[test]
+    fn test_transaction_status_update_serialization() {
+        let update = TransactionStatusUpdate {
+            transaction_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            status: "completed".to_string(),
+            timestamp: chrono::Utc::now(),
+            message: Some("Transaction processed".to_string()),
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        assert!(json.contains("completed"));
+        assert!(json.contains("Transaction processed"));
+    }
+
+    #[test]
+    fn test_ws_query_token_present() {
+        let json = r#"{"token": "test_token"}"#;
+        let query: WsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.token, Some("test_token".to_string()));
+    }
+
+    #[test]
+    fn test_ws_query_token_absent() {
+        let json = r#"{}"#;
+        let query: WsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.token, None);
+    }
+
+    #[test]
+    fn test_resync_limit_clamping_below_min() {
+        let limit = 0i64.clamp(1, RESYNC_MAX_LIMIT);
+        assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn test_resync_limit_clamping_above_max() {
+        let limit = 200i64.clamp(1, RESYNC_MAX_LIMIT);
+        assert_eq!(limit, RESYNC_MAX_LIMIT);
+    }
+
+    #[test]
+    fn test_resync_limit_clamping_within_range() {
+        let limit = 50i64.clamp(1, RESYNC_MAX_LIMIT);
+        assert_eq!(limit, 50);
+    }
+
+    #[test]
+    fn test_dependency_severity_critical() {
+        let severity = DependencySeverity::Critical;
+        assert_eq!(severity, DependencySeverity::Critical);
+    }
+
+    #[test]
+    fn test_dependency_severity_non_critical() {
+        let severity = DependencySeverity::NonCritical;
+        assert_eq!(severity, DependencySeverity::NonCritical);
+    }
 }
