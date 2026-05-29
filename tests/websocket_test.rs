@@ -37,7 +37,7 @@ async fn setup_test_app() -> (
 
     let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
-    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
+    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -57,7 +57,9 @@ async fn setup_test_app() -> (
         )),
         pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        secrets_store: None,
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
+        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = create_app(app_state);
@@ -141,6 +143,7 @@ async fn test_ws_receives_transaction_updates() {
     let transaction_id = Uuid::new_v4();
     let update = TransactionStatusUpdate {
         transaction_id,
+        tenant_id: Uuid::default(),
         status: "completed".to_string(),
         timestamp: Utc::now(),
         message: Some("Transaction processed successfully".to_string()),
@@ -155,13 +158,26 @@ async fn test_ws_receives_transaction_updates() {
 
     let msg = msg.unwrap().unwrap().unwrap();
 
-    if let Message::Text(text) = msg {
-        let received: TransactionStatusUpdate = serde_json::from_str(&text).unwrap();
-        assert_eq!(received.transaction_id, transaction_id);
-        assert_eq!(received.status, "completed");
+    // Skip any ping frames and wait for the text message
+    let text = if let Message::Text(t) = msg {
+        t
     } else {
-        panic!("Expected text message, got {:?}", msg);
-    }
+        // drain until we get a text message
+        loop {
+            let m = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let Message::Text(t) = m {
+                break t;
+            }
+        }
+    };
+
+    let received: TransactionStatusUpdate = serde_json::from_str(&text).unwrap();
+    assert_eq!(received.transaction_id, transaction_id);
+    assert_eq!(received.status, "completed");
 
     ws_stream.close(None).await.unwrap();
 }
@@ -187,6 +203,7 @@ async fn test_ws_multiple_clients_receive_broadcast() {
     let transaction_id = Uuid::new_v4();
     let update = TransactionStatusUpdate {
         transaction_id,
+        tenant_id: Uuid::default(),
         status: "pending".to_string(),
         timestamp: Utc::now(),
         message: None,
@@ -195,34 +212,33 @@ async fn test_ws_multiple_clients_receive_broadcast() {
     let sent_count = tx_broadcast.send(update.clone()).unwrap();
     assert_eq!(sent_count, 3, "Should have 3 active subscribers");
 
-    // All clients should receive the message
-    let msg1 = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    // All clients should receive the message — skip any ping frames
+    async fn next_text(
+        stream: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        loop {
+            let msg = tokio::time::timeout(tokio::time::Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let Message::Text(t) = msg {
+                return t;
+            }
+        }
+    }
 
-    let msg2 = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-    let msg3 = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream3.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let text1 = next_text(&mut ws_stream1).await;
+    let text2 = next_text(&mut ws_stream2).await;
+    let text3 = next_text(&mut ws_stream3).await;
 
     // Verify all received the same update
-    for msg in [msg1, msg2, msg3] {
-        if let Message::Text(text) = msg {
-            let received: TransactionStatusUpdate = serde_json::from_str(&text).unwrap();
-            assert_eq!(received.transaction_id, transaction_id);
-            assert_eq!(received.status, "pending");
-        } else {
-            panic!("Expected text message");
-        }
+    for text in [text1, text2, text3] {
+        let received: TransactionStatusUpdate = serde_json::from_str(&text).unwrap();
+        assert_eq!(received.transaction_id, transaction_id);
+        assert_eq!(received.status, "pending");
     }
 
     ws_stream1.close(None).await.unwrap();
@@ -246,6 +262,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
     let update = TransactionStatusUpdate {
         transaction_id: Uuid::new_v4(),
         status: "test".to_string(),
+        tenant_id: Uuid::default(),
         timestamp: Utc::now(),
         message: None,
     };
@@ -263,11 +280,12 @@ async fn test_ws_connection_cleanup_on_disconnect() {
     let update2 = TransactionStatusUpdate {
         transaction_id: Uuid::new_v4(),
         status: "test2".to_string(),
+        tenant_id: Uuid::default(),
         timestamp: Utc::now(),
         message: None,
     };
 
-    let sent_count2 = tx_broadcast.send(update2).unwrap();
+    let sent_count2 = tx_broadcast.send(update2).unwrap_or(0);
     assert_eq!(
         sent_count2, 0,
         "Should have 0 active subscribers after disconnect"
@@ -347,6 +365,7 @@ async fn test_ws_handles_rapid_broadcasts() {
 
         let update = TransactionStatusUpdate {
             transaction_id,
+            tenant_id: Uuid::default(),
             status: format!("status_{}", i),
             timestamp: Utc::now(),
             message: Some(format!("Update {}", i)),
@@ -357,9 +376,10 @@ async fn test_ws_handles_rapid_broadcasts() {
 
     // Receive all messages
     let mut received_count = 0;
-    for _ in 0..10 {
+    let mut attempts = 0;
+    while received_count < 10 && attempts < 20 {
+        attempts += 1;
         let msg = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream.next()).await;
-
         if let Ok(Some(Ok(Message::Text(_)))) = msg {
             received_count += 1;
         }

@@ -6,6 +6,32 @@ This guide walks through setting up a local development environment, running the
 
 ---
 
+## Automated Setup (Recommended)
+
+The fastest way to get started is the setup script, which handles prerequisites checking, environment configuration, Docker services, migrations, and a health check in one command:
+
+```bash
+./scripts/setup.sh
+```
+
+To wipe all existing data and start completely fresh:
+
+```bash
+./scripts/setup.sh --reset
+```
+
+The script will:
+- Verify Rust, Docker, and `psql` are installed
+- Copy `.env.example.failover` → `.env` if no `.env` exists
+- Start PostgreSQL and Redis via Docker Compose
+- Wait for both services to pass their health checks
+- Install `sqlx-cli` if needed and run all migrations
+- Print next steps to start the server
+
+If you prefer to set things up manually, follow the steps below.
+
+---
+
 ## Prerequisites
 
 | Tool        | Version        | Installation                               |
@@ -185,7 +211,51 @@ docker compose down -v
 
 ---
 
-## 8. Docker (Standalone)
+## 8. Docker Compose (Development — Hot Reload)
+
+The dev compose file mounts source code as volumes and uses `cargo-watch` to rebuild on file changes.
+
+```bash
+docker compose -f docker-compose.dev.yml up
+```
+
+This starts:
+
+| Service  | Container              | Port  | Description                          |
+|----------|------------------------|-------|--------------------------------------|
+| postgres | `synapse-postgres-dev` | 5432  | PostgreSQL 14 Alpine                 |
+| redis    | `synapse-redis-dev`    | 6379  | Redis 7 Alpine                       |
+| adminer  | `synapse-adminer`      | 8080  | Adminer database UI                  |
+| app      | `synapse-app-dev`      | 3000  | synapse-core with hot-reload         |
+
+**Hot reload:** Any change to a file under `src/` or `migrations/` triggers an automatic recompile and restart via `cargo-watch`. The first startup is slow (compiling from scratch); subsequent reloads are fast.
+
+**Database UI:** Open [http://localhost:8080](http://localhost:8080) in your browser. Use these credentials:
+- System: `PostgreSQL`
+- Server: `postgres`
+- Username: `synapse`
+- Password: `synapse`
+- Database: `synapse`
+
+**Debug port:** Port `9229` is exposed for IDE debugger attachment (lldb-server / rust-gdb). Configure your IDE to connect to `localhost:9229`.
+
+**Cargo cache:** The `cargo_registry`, `cargo_git`, and `target_cache` Docker volumes persist the build cache between restarts, so you only pay the full compile cost once.
+
+To stop and remove dev containers:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
+To also wipe the build cache volumes (forces a full recompile next time):
+
+```bash
+docker compose -f docker-compose.dev.yml down -v
+```
+
+---
+
+## 9. Docker (Standalone)
 
 Build the image manually:
 
@@ -207,7 +277,7 @@ docker run -p 3000:3000 \
 
 ---
 
-## 9. Project Structure
+## 10. Project Structure
 
 ```
 synapse-core/

@@ -9,6 +9,9 @@ use crate::db::models::Transaction;
 use crate::services::lock_manager::LeaderElection;
 use crate::stellar::HorizonClient;
 
+const LEADER_HEARTBEAT_SECS: u64 = 15;
+const POLL_INTERVAL_SECS: u64 = 5;
+
 /// Exponential moving average tracker for adaptive batch sizing.
 pub struct BatchSizer {
     ema: f64,
@@ -57,6 +60,7 @@ pub struct ProcessorPool {
 }
 
 impl ProcessorPool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         horizon_client: HorizonClient,
@@ -163,7 +167,7 @@ pub async fn process_batch(
         r#"
         SELECT id, stellar_account, amount, asset_code, status, created_at, updated_at,
                anchor_transaction_id, callback_type, callback_status, settlement_id,
-               memo, memo_type, metadata, priority
+               memo, memo_type, metadata, priority, trace_id
         FROM transactions
         WHERE status = 'pending'
         ORDER BY created_at ASC
@@ -186,6 +190,17 @@ pub async fn process_batch(
     let mut asset_codes = std::collections::HashSet::new();
     for transaction in &pending {
         asset_codes.insert(transaction.asset_code.clone());
+
+        // Create linked span for transaction processing if trace_id exists
+        if let Some(ref trace_id) = transaction.trace_id {
+            let span = tracing::info_span!(
+                "transaction.process",
+                transaction_id = %transaction.id,
+                trace_id = %trace_id,
+            );
+            let _guard = span.enter();
+            debug!("Processing transaction with trace context");
+        }
     }
 
     // TODO: per-transaction processing logic
@@ -240,6 +255,58 @@ pub async fn queue_depth_task(pool: PgPool, pending_queue_depth: Arc<AtomicU64>)
     }
 }
 
+/// Runs the leader election + heartbeat loop.
+///
+/// - All instances call this; only the elected leader returns `true` from
+///   `try_acquire_leadership`.
+/// - The leader runs partition maintenance, settlement jobs, and webhook dispatch.
+/// - All instances run `process_batch` (safe via SKIP LOCKED).
+pub async fn run_processor_with_leader_election(
+    pool: PgPool,
+    horizon_client: HorizonClient,
+    redis_url: &str,
+) {
+    let election = match LeaderElection::new(redis_url) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to create LeaderElection (Redis unavailable?): {e}. Running without leader guard.");
+            run_processor(pool, horizon_client).await;
+            return;
+        }
+    };
+
+    info!(
+        instance_id = election.instance_id(),
+        "Processor started with leader election"
+    );
+
+    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(LEADER_HEARTBEAT_SECS));
+    let mut process_tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
+
+    loop {
+        tokio::select! {
+            _ = heartbeat_tick.tick() => {
+                // Publish heartbeat regardless of leader status
+                if let Err(e) = election.publish_heartbeat().await {
+                    warn!("Heartbeat publish failed: {e}");
+                }
+
+                match election.try_acquire_leadership().await {
+                    Ok(true) => debug!(instance_id = election.instance_id(), "This instance is leader"),
+                    Ok(false) => debug!(instance_id = election.instance_id(), "This instance is follower"),
+                    Err(e) => warn!("Leader election error: {e}"),
+                }
+            }
+            _ = process_tick.tick() => {
+                // All instances process transactions (SKIP LOCKED handles concurrency)
+                if let Err(e) = process_batch(&pool, &horizon_client, 10).await {
+                    error!("Processor batch error: {e}");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,57 +352,5 @@ mod tests {
             s.update(0);
         }
         assert!(s.current() < high);
-    }
-}
-
-/// Runs the leader election + heartbeat loop.
-///
-/// - All instances call this; only the elected leader returns `true` from
-///   `try_acquire_leadership`.
-/// - The leader runs partition maintenance, settlement jobs, and webhook dispatch.
-/// - All instances run `process_batch` (safe via SKIP LOCKED).
-pub async fn run_processor_with_leader_election(
-    pool: PgPool,
-    horizon_client: HorizonClient,
-    redis_url: &str,
-) {
-    let election = match LeaderElection::new(redis_url) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("Failed to create LeaderElection (Redis unavailable?): {e}. Running without leader guard.");
-            run_processor(pool, horizon_client).await;
-            return;
-        }
-    };
-
-    info!(
-        instance_id = election.instance_id(),
-        "Processor started with leader election"
-    );
-
-    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(LEADER_HEARTBEAT_SECS));
-    let mut process_tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
-
-    loop {
-        tokio::select! {
-            _ = heartbeat_tick.tick() => {
-                // Publish heartbeat regardless of leader status
-                if let Err(e) = election.publish_heartbeat().await {
-                    warn!("Heartbeat publish failed: {e}");
-                }
-
-                match election.try_acquire_leadership().await {
-                    Ok(true) => debug!(instance_id = election.instance_id(), "This instance is leader"),
-                    Ok(false) => debug!(instance_id = election.instance_id(), "This instance is follower"),
-                    Err(e) => warn!("Leader election error: {e}"),
-                }
-            }
-            _ = process_tick.tick() => {
-                // All instances process transactions (SKIP LOCKED handles concurrency)
-                if let Err(e) = process_batch(&pool, &horizon_client).await {
-                    error!("Processor batch error: {e}");
-                }
-            }
-        }
     }
 }

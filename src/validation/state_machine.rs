@@ -33,6 +33,9 @@ pub fn validate_status_transition(from: &str, to: &str) -> Result<(), AppError> 
         // From failed (reprocess)
         ("failed", "pending") => true,
 
+        // From dlq (requeue)
+        ("dlq", "pending") => true,
+
         // All other transitions are invalid
         _ => false,
     };
@@ -41,8 +44,7 @@ pub fn validate_status_transition(from: &str, to: &str) -> Result<(), AppError> 
         Ok(())
     } else {
         Err(AppError::InvalidStatusTransition(format!(
-            "Cannot transition from '{}' to '{}'",
-            from, to
+            "Cannot transition from '{from}' to '{to}'"
         )))
     }
 }

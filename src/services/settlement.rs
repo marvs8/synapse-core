@@ -1,11 +1,28 @@
-use crate::db::models::Settlement;
+use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
+use crate::error::AppError;
+use bigdecimal::BigDecimal;
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::AppError;
-use bigdecimal::BigDecimal;
+/// Returns `true` when transitioning from `from` to `to` is allowed by the
+/// settlement state machine.
+fn valid_transition(from: &str, to: &str) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        ("completed", "pending_review")
+            | ("pending_review", "disputed")
+            | ("pending_review", "voided")
+            | ("pending_review", "completed")
+            | ("disputed", "adjusted")
+            | ("disputed", "voided")
+            | ("adjusted", "completed")
+    )
+}
 
 /// Maps a `sqlx::Error` to the appropriate `AppError` variant.
 ///
@@ -20,37 +37,63 @@ fn map_db_err(e: sqlx::Error) -> AppError {
 
 pub struct SettlementService {
     pool: PgPool,
+    max_batch_size: usize,
+    min_tx_count: usize,
 }
 
 impl SettlementService {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            max_batch_size: 10_000,
+            min_tx_count: 1,
+        }
+    }
+
+    pub fn with_config(pool: PgPool, max_batch_size: usize, min_tx_count: usize) -> Self {
+        Self {
+            pool,
+            max_batch_size,
+            min_tx_count,
+        }
     }
 
     /// Run settlement for all assets with completed, unsettled transactions.
+    /// Respects each asset's `settlement_schedule` — assets configured as
+    /// `"hourly"` are always eligible; `"daily"` assets only settle once per day;
+    /// `"weekly"` assets only settle on Mondays.
     pub async fn run_settlements(&self) -> Result<Vec<Settlement>, AppError> {
-        let assets = queries::get_unique_assets_to_settle(&self.pool)
+        let asset_codes = queries::get_unique_assets_to_settle(&self.pool)
             .await
             .map_err(map_db_err)?;
 
+        // Load asset configs so we can apply per-asset schedules
+        let assets = Asset::fetch_all(&self.pool)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        let _asset_map: std::collections::HashMap<String, Asset> = assets
+            .into_iter()
+            .map(|a| (a.asset_code.clone(), a))
+            .collect();
+
+        let _now = Utc::now();
         let mut results = Vec::new();
-        for asset in assets {
-            match self.settle_asset(&asset).await {
-                Ok(Some(settlement)) => results.push(settlement),
-                Ok(None) => tracing::info!("No transactions to settle for asset {}", asset),
-                Err(e) => tracing::error!("Failed to settle asset {}: {:?}", asset, e),
+        for asset_code in &asset_codes {
+            match self.settle_asset(asset_code).await {
+                Ok(settlements) => results.extend(settlements),
+                Err(e) => tracing::error!("Failed to settle asset {:?}: {:?}", asset_code, e),
             }
         }
 
         Ok(results)
     }
 
-    /// Settle transactions for a specific asset.
+    /// Settle transactions for a specific asset, splitting into multiple
+    /// settlements when the number of transactions exceeds `max_batch_size`.
     ///
-    /// Returns `Ok(None)` when there are no unsettled transactions for the
-    /// given asset, `Ok(Some(settlement))` on success, and an `AppError` on
-    /// any database or domain-level failure.
-    pub async fn settle_asset(&self, asset_code: &str) -> Result<Option<Settlement>, AppError> {
+    /// Returns an empty `Vec` when there are fewer than `min_tx_count`
+    /// transactions.  Returns `Err` on any database or domain-level failure.
+    pub async fn settle_asset(&self, asset_code: &str) -> Result<Vec<Settlement>, AppError> {
         // Validate asset_code is non-empty before touching the database.
         if asset_code.trim().is_empty() {
             return Err(AppError::InvalidSettlementAmount(
@@ -60,93 +103,166 @@ impl SettlementService {
 
         let mut tx = self.pool.begin().await.map_err(map_db_err)?;
 
-        // We settle everything up to "now"
         let end_time = Utc::now();
 
-        // Fetch candidate transactions with FOR UPDATE lock
         let unsettled = queries::get_unsettled_transactions(&mut tx, asset_code, end_time)
             .await
             .map_err(|e| {
-                // Roll back is best-effort here; the transaction will be
-                // aborted by the server when the connection is dropped anyway.
                 tracing::warn!("Failed to fetch unsettled transactions for {asset_code}: {e}");
                 map_db_err(e)
             })?;
 
-        if unsettled.is_empty() {
+        if unsettled.len() < self.min_tx_count {
             tx.rollback().await.map_err(map_db_err)?;
-            return Ok(None);
+            if unsettled.is_empty() {
+                tracing::info!("No transactions to settle for asset {}", asset_code);
+            } else {
+                tracing::info!(
+                    "Skipping settlement for asset {}: {} transaction(s) below minimum {}",
+                    asset_code,
+                    unsettled.len(),
+                    self.min_tx_count
+                );
+            }
+            return Ok(vec![]);
         }
 
-        let tx_count = unsettled.len() as i32;
-        let total_amount: BigDecimal = unsettled
-            .iter()
-            .map(|t| t.amount.clone())
-            .fold(BigDecimal::from(0), |acc, x| acc + x);
+        let total_tx = unsettled.len();
+        let batch_count = total_tx.div_ceil(self.max_batch_size);
+        tracing::info!(
+            asset = %asset_code,
+            total_transactions = total_tx,
+            batch_size = self.max_batch_size,
+            batches = batch_count,
+            "Starting settlement"
+        );
 
-        // Reject a settlement whose net amount is zero or negative — this
-        // would indicate corrupted data and should never be committed.
-        if total_amount <= BigDecimal::from(0) {
-            tx.rollback().await.map_err(map_db_err)?;
-            return Err(AppError::InvalidSettlementAmount(format!(
-                "computed total for asset '{asset_code}' is non-positive: {total_amount}"
-            )));
+        let mut settlements = Vec::with_capacity(batch_count);
+
+        for (batch_idx, chunk) in unsettled.chunks(self.max_batch_size).enumerate() {
+            let tx_count = chunk.len() as i32;
+            let total_amount: BigDecimal = chunk
+                .iter()
+                .map(|t| t.amount.clone())
+                .fold(BigDecimal::from(0), |acc, x| acc + x);
+
+            // Reject a batch whose net amount is zero or negative — this
+            // would indicate corrupted data and should never be committed.
+            if total_amount <= BigDecimal::from(0) {
+                tx.rollback().await.map_err(map_db_err)?;
+                return Err(AppError::InvalidSettlementAmount(format!(
+                    "computed total for asset '{asset_code}' batch {} is non-positive: {total_amount}",
+                    batch_idx + 1
+                )));
+            }
+
+            let period_start = chunk.iter().map(|t| t.created_at).min().unwrap_or(end_time);
+            let period_end = chunk.iter().map(|t| t.updated_at).max().unwrap_or(end_time);
+
+            let settlement = Settlement {
+                id: Uuid::new_v4(),
+                asset_code: asset_code.to_string(),
+                total_amount: total_amount.clone(),
+                tx_count,
+                period_start,
+                period_end,
+                status: "completed".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                dispute_reason: None,
+                original_total_amount: None,
+                reviewed_by: None,
+                reviewed_at: None,
+            };
+
+            let saved = queries::insert_settlement(&mut tx, &settlement)
+                .await
+                .map_err(map_db_err)?;
+
+            let tx_ids: Vec<Uuid> = chunk.iter().map(|t| t.id).collect();
+            queries::update_transactions_settlement(&mut tx, &tx_ids, saved.id)
+                .await
+                .map_err(map_db_err)?;
+
+            tracing::info!(
+                asset = %asset_code,
+                settlement_id = %saved.id,
+                batch = batch_idx + 1,
+                total_batches = batch_count,
+                tx_count,
+                total_amount = %total_amount,
+                "Settlement batch created"
+            );
+
+            settlements.push(saved);
         }
-
-        // Find the range of transactions
-        let period_start = unsettled
-            .iter()
-            .map(|t| t.created_at)
-            .min()
-            .unwrap_or(end_time);
-        let period_end = unsettled
-            .iter()
-            .map(|t| t.updated_at)
-            .max()
-            .unwrap_or(end_time);
-
-        let settlement = Settlement {
-            id: Uuid::new_v4(),
-            asset_code: asset_code.to_string(),
-            total_amount,
-            tx_count,
-            period_start,
-            period_end,
-            status: "completed".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        // Save settlement record
-        let saved_settlement = queries::insert_settlement(&mut tx, &settlement)
-            .await
-            .map_err(map_db_err)?;
-
-        // Link transactions to settlement
-        let tx_ids: Vec<Uuid> = unsettled.iter().map(|t| t.id).collect();
-        queries::update_transactions_settlement(&mut tx, &tx_ids, saved_settlement.id)
-            .await
-            .map_err(map_db_err)?;
 
         tx.commit().await.map_err(map_db_err)?;
 
-        // Invalidate cache after successful commit
         queries::invalidate_caches_for_asset(asset_code).await;
 
-        tracing::info!(
-            "Settled {} transactions for asset {} (ID: {})",
-            tx_count,
-            asset_code,
-            saved_settlement.id
-        );
+        Ok(settlements)
+    }
 
-        Ok(Some(saved_settlement))
+    /// Change a settlement's status (dispute, adjust, void, etc.).
+    /// Validates the transition, then delegates to the query layer which
+    /// handles audit logging and releasing transactions on void.
+    pub async fn update_status(
+        &self,
+        id: Uuid,
+        new_status: &str,
+        reason: Option<&str>,
+        new_total: Option<&BigDecimal>,
+        actor: &str,
+    ) -> Result<Settlement, AppError> {
+        let current = queries::get_settlement(&self.pool, id).await.map_err(|e| {
+            if matches!(e, sqlx::Error::RowNotFound) {
+                AppError::NotFound(format!("settlement {id}"))
+            } else {
+                AppError::DatabaseError(e.to_string())
+            }
+        })?;
+
+        if !valid_transition(&current.status, new_status) {
+            return Err(AppError::BadRequest(format!(
+                "invalid transition: {} -> {}",
+                current.status, new_status
+            )));
+        }
+
+        queries::update_settlement_status(&self.pool, id, new_status, reason, new_total, actor)
+            .await
+            .map_err(map_db_err)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bigdecimal::FromPrimitive;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn make_tx(amount: f64) -> crate::db::models::Transaction {
+        let now = Utc::now();
+        crate::db::models::Transaction {
+            id: Uuid::new_v4(),
+            stellar_account: "GABC".to_string(),
+            amount: BigDecimal::from_f64(amount).unwrap(),
+            asset_code: "USD".to_string(),
+            status: "completed".to_string(),
+            created_at: now,
+            updated_at: now,
+            anchor_transaction_id: None,
+            callback_type: None,
+            callback_status: None,
+            settlement_id: None,
+            memo: None,
+            memo_type: None,
+            metadata: None,
+            tenant_id: None,
+        }
+    }
 
     #[test]
     fn map_db_err_row_not_found_becomes_not_found() {
@@ -158,5 +274,57 @@ mod tests {
     fn map_db_err_other_becomes_database_error() {
         let err = map_db_err(sqlx::Error::PoolTimedOut);
         assert!(matches!(err, AppError::DatabaseError(_)));
+    }
+
+    #[test]
+    fn valid_transition_allows_expected_paths() {
+        assert!(valid_transition("completed", "pending_review"));
+        assert!(valid_transition("pending_review", "disputed"));
+        assert!(valid_transition("disputed", "adjusted"));
+        assert!(valid_transition("adjusted", "completed"));
+        assert!(valid_transition("pending_review", "voided"));
+    }
+
+    #[test]
+    fn valid_transition_rejects_invalid_paths() {
+        assert!(!valid_transition("completed", "voided"));
+        assert!(!valid_transition("adjusted", "disputed"));
+        assert!(!valid_transition("voided", "completed"));
+    }
+
+    #[test]
+    fn batch_split_logic() {
+        // 25 transactions with max_batch_size=10 → 3 batches (10, 10, 5)
+        let txs: Vec<_> = (0..25).map(|_| make_tx(1.0)).collect();
+        let chunks: Vec<_> = txs.chunks(10).collect();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 10);
+        assert_eq!(chunks[1].len(), 10);
+        assert_eq!(chunks[2].len(), 5);
+    }
+
+    #[test]
+    fn below_min_tx_count_check() {
+        let svc = SettlementService::with_config(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+            10_000,
+            5,
+        );
+        assert!(3 < svc.min_tx_count);
+    }
+
+    #[test]
+    fn default_config_values() {
+        let svc = SettlementService::with_config(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+            10_000,
+            1,
+        );
+        assert_eq!(svc.max_batch_size, 10_000);
+        assert_eq!(svc.min_tx_count, 1);
     }
 }

@@ -77,7 +77,7 @@ pub fn validate_max_len(field: &'static str, value: &str, max_len: usize) -> Val
     if value.len() > max_len {
         return Err(ValidationError::new(
             field,
-            format!("must be at most {} characters", max_len),
+            format!("must be at most {max_len} characters"),
         ));
     }
 
@@ -102,7 +102,7 @@ pub fn validate_stellar_address(stellar_address: &str) -> ValidationResult {
     if stellar_address.len() != STELLAR_ACCOUNT_LEN {
         return Err(ValidationError::new(
             "stellar_address",
-            format!("must be exactly {} characters", STELLAR_ACCOUNT_LEN),
+            format!("must be exactly {STELLAR_ACCOUNT_LEN} characters"),
         ));
     }
 
@@ -262,7 +262,6 @@ mod tests {
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
-    use std::str::FromStr;
 
     // --- validate_stellar_address ---
 

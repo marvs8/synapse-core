@@ -18,7 +18,6 @@
 
 use std::time::Duration;
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,

@@ -2,7 +2,46 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use sqlx::FromRow;
+use std::str::FromStr;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "text")]
+pub enum TransactionStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "processing")]
+    Processing,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+impl std::fmt::Display for TransactionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionStatus::Pending => write!(f, "pending"),
+            TransactionStatus::Processing => write!(f, "processing"),
+            TransactionStatus::Completed => write!(f, "completed"),
+            TransactionStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl FromStr for TransactionStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(TransactionStatus::Pending),
+            "processing" => Ok(TransactionStatus::Processing),
+            "completed" => Ok(TransactionStatus::Completed),
+            "failed" => Ok(TransactionStatus::Failed),
+            _ => Err(format!("Invalid transaction status: {}", s)),
+        }
+    }
+}
 
 #[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +60,7 @@ pub struct Transaction {
     pub memo: Option<String>,
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub trace_id: Option<String>,
 }
 
 #[async_graphql::Object]
@@ -84,7 +124,7 @@ impl Transaction {
             stellar_account,
             amount,
             asset_code,
-            status: "pending".to_string(),
+            status: TransactionStatus::Pending.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             anchor_transaction_id,
@@ -94,7 +134,13 @@ impl Transaction {
             memo,
             memo_type,
             metadata,
+            trace_id: None,
         }
+    }
+
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
+        self
     }
 }
 
@@ -109,6 +155,10 @@ pub struct Settlement {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub dispute_reason: Option<String>,
+    pub original_total_amount: Option<BigDecimal>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
 }
 
 #[async_graphql::Object]
@@ -345,16 +395,48 @@ mod tests {
     }
 }
 
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct ComplianceReport {
+    pub id: Uuid,
+    pub period: String,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub transaction_count: i64,
+    pub settlement_total: sqlx::types::BigDecimal,
+    pub anomaly_count: i64,
+    pub volume_by_asset: serde_json::Value,
+    pub top_accounts: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
 // Minimal Asset struct for asset cache functionality
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Asset {
+    pub id: Uuid,
     pub asset_code: String,
-    pub issuer: Option<String>,
+    pub asset_issuer: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Asset {
-    pub async fn fetch_all(_pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        // Placeholder implementation - returns empty vec for now
-        Ok(vec![])
+    /// Fetch all assets from the database.
+    pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Check whether a given asset code is registered and enabled.
+    pub async fn is_registered(pool: &sqlx::PgPool, code: &str) -> Result<bool, sqlx::Error> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assets WHERE asset_code = $1 AND enabled = TRUE)",
+        )
+        .bind(code)
+        .fetch_one(pool)
+        .await?;
+        Ok(exists)
     }
 }
