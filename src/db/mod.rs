@@ -45,6 +45,7 @@ pub mod pool_manager;
 pub mod queries;
 pub mod session;
 pub mod slow_query;
+pub mod webhook;
 
 /// Maximum time to wait for in-flight queries to finish during graceful shutdown.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
