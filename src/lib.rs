@@ -186,8 +186,9 @@ pub fn create_app(app_state: AppState) -> Router {
 
     // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
     let mut admin_router = Router::new()
-        .route("/health", get(handlers::health))
+        .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
+        .route("/health", get(handlers::health))
         .route("/errors", get(handlers::error_catalog));
 
     if let Some(store) = &app_state.secrets_store {
