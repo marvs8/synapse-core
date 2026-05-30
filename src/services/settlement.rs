@@ -28,6 +28,17 @@ fn valid_transition(from: &str, to: &str) -> bool {
     )
 }
 
+/// Maps a `sqlx::Error` to the appropriate `AppError` variant.
+///
+/// `RowNotFound` is treated as a domain-level not-found rather than a generic
+/// database error so callers can distinguish the two cases.
+fn map_db_err(e: sqlx::Error) -> AppError {
+    match e {
+        sqlx::Error::RowNotFound => AppError::NotFound("settlement record not found".to_string()),
+        other => AppError::DatabaseError(other.to_string()),
+    }
+}
+
 pub struct SettlementService {
     pool: PgPool,
     max_batch_size: usize,
@@ -178,7 +189,8 @@ impl SettlementService {
     /// Settle transactions for a specific asset, splitting into multiple settlements
     /// when the number of transactions exceeds `max_batch_size`.
     ///
-    /// Returns an empty `Vec` when there are fewer than `min_tx_count` transactions.
+    /// Returns an empty `Vec` when there are fewer than `min_tx_count`
+    /// transactions.  Returns `Err` on any database or domain-level failure.
     pub async fn settle_asset(&self, asset_code: &str) -> Result<Vec<Settlement>, AppError> {
         let start = std::time::Instant::now();
             
@@ -195,9 +207,7 @@ impl SettlementService {
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
     
         if unsettled.len() < self.min_tx_count {
-            tx.rollback()
-                .await
-                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            tx.rollback().await.map_err(map_db_err)?;
             if unsettled.is_empty() {
                 tracing::info!("No transactions to settle for asset {}", asset_code);
             } else {
@@ -324,7 +334,7 @@ impl SettlementService {
 
         queries::update_settlement_status(&self.pool, id, new_status, reason, new_total, actor)
             .await
-            .map_err(|e| AppError::DatabaseError(e.to_string()))
+            .map_err(map_db_err)
     }
 }
 
@@ -357,6 +367,34 @@ mod tests {
     }
 
     #[test]
+    fn map_db_err_row_not_found_becomes_not_found() {
+        let err = map_db_err(sqlx::Error::RowNotFound);
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn map_db_err_other_becomes_database_error() {
+        let err = map_db_err(sqlx::Error::PoolTimedOut);
+        assert!(matches!(err, AppError::DatabaseError(_)));
+    }
+
+    #[test]
+    fn valid_transition_allows_expected_paths() {
+        assert!(valid_transition("completed", "pending_review"));
+        assert!(valid_transition("pending_review", "disputed"));
+        assert!(valid_transition("disputed", "adjusted"));
+        assert!(valid_transition("adjusted", "completed"));
+        assert!(valid_transition("pending_review", "voided"));
+    }
+
+    #[test]
+    fn valid_transition_rejects_invalid_paths() {
+        assert!(!valid_transition("completed", "voided"));
+        assert!(!valid_transition("adjusted", "disputed"));
+        assert!(!valid_transition("voided", "completed"));
+    }
+
+    #[test]
     fn batch_split_logic() {
         // 25 transactions with max_batch_size=10 → 3 batches (10, 10, 5)
         let txs: Vec<_> = (0..25).map(|_| make_tx(1.0)).collect();
@@ -367,8 +405,8 @@ mod tests {
         assert_eq!(chunks[2].len(), 5);
     }
 
-    #[tokio::test]
-    async fn below_min_tx_count_skipped() {
+    #[test]
+    fn below_min_tx_count_check() {
         let svc = SettlementService::with_config(
             sqlx::postgres::PgPoolOptions::new()
                 .connect_lazy("postgres://dummy")
@@ -379,8 +417,8 @@ mod tests {
         assert!(3 < svc.min_tx_count);
     }
 
-    #[tokio::test]
-    async fn default_config_values() {
+    #[test]
+    fn default_config_values() {
         let svc = SettlementService::with_config(
             sqlx::postgres::PgPoolOptions::new()
                 .connect_lazy("postgres://dummy")
