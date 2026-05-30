@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ "develop" ]
 
+# Cancel any in-progress run for the same branch/PR so stale sessions never
+# block fresh commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
@@ -15,6 +21,7 @@ env:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -29,9 +36,10 @@ jobs:
           POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 10s
         ports:
           - 5432:5432
 
@@ -73,7 +81,6 @@ jobs:
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
-
     - name: Run migrations
       id: run_migrations
       run: |
@@ -84,6 +91,13 @@ jobs:
           exit 1
         fi
         echo "Migrations completed successfully"
+      run: |
+        for i in 1 2 3; do
+          sqlx migrate run && break
+          echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+        done
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
       continue-on-error: false
@@ -157,9 +171,9 @@ jobs:
         exit 1
 
 
-
   integration-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -174,18 +188,20 @@ jobs:
           POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 10s
         ports:
           - 5432:5432
       redis:
         image: redis:7-alpine
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 5s
         ports:
           - 6379:6379
 
@@ -196,6 +212,9 @@ jobs:
       uses: dtolnay/rust-toolchain@v1
       with:
         toolchain: ${{ matrix.rust }}
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
@@ -210,17 +229,19 @@ jobs:
           ${{ runner.os }}-${{ matrix.rust }}-cargo-
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      uses: taiki-e/install-action@sccache
-
     - name: Install sqlx-cli
       uses: taiki-e/install-action@v2
       with:
         tool: sqlx-cli@0.7.4
 
-
     - name: Run migrations
-      run: sqlx migrate run
+      run: |
+        for i in 1 2 3; do
+          sqlx migrate run && break
+          echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+        done
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
@@ -247,9 +268,9 @@ jobs:
         exit 1
 
 
-
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs:
       - unit-tests
       - integration-tests
@@ -266,18 +287,20 @@ jobs:
           POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 10s
         ports:
           - 5432:5432
       redis:
         image: redis:7-alpine
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 10s
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 5s
         ports:
           - 6379:6379
 
@@ -289,6 +312,9 @@ jobs:
       with:
         toolchain: stable
         components: llvm-tools-preview
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
@@ -303,9 +329,6 @@ jobs:
           ${{ runner.os }}-coverage-cargo-
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      uses: taiki-e/install-action@sccache
-
     - name: Install sqlx-cli
       uses: taiki-e/install-action@v2
       with:
@@ -314,9 +337,14 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
-
     - name: Run migrations
-      run: sqlx migrate run
+      run: |
+        for i in 1 2 3; do
+          sqlx migrate run && break
+          echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+          sleep 5
+          [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+        done
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
