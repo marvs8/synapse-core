@@ -326,6 +326,16 @@ pub async fn set_tenant_context(
 /// entry in the same SQL transaction, and invalidates aggregate caches only
 /// after commit. Handlers should use this helper instead of issuing their own
 /// INSERT so webhook persistence remains auditable and timeout protected.
+///
+/// This is wrapped in [`crate::utils::retry::retry_with_backoff`], so the
+/// insert is keyed on the caller-generated `tx.id`/`tx.created_at` (the
+/// partitioned table's primary key) and uses
+/// `ON CONFLICT (id, created_at) DO NOTHING`: if an earlier attempt's commit
+/// actually succeeded but the client saw a transient error anyway (e.g. the
+/// connection dropped right after `COMMIT`), the retry observes the existing
+/// row instead of inserting a duplicate or double-writing the audit log.
+/// Coordinates with the `anchor_transaction_id` idempotency guard so the
+/// same inbound Anchor callback can't be persisted twice either.
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
     with_timeout(
         QueryTier::Write,
@@ -333,8 +343,10 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
         crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
             let mut db_tx = pool.begin().await?;
 
-            let result = persist_transaction(&mut db_tx, tx).await?;
-            audit_transaction_creation(&mut db_tx, &result).await?;
+            let (result, inserted) = persist_transaction(&mut db_tx, tx).await?;
+            if inserted {
+                audit_transaction_creation(&mut db_tx, &result).await?;
+            }
 
             db_tx.commit().await?;
 
@@ -347,17 +359,23 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .await
 }
 
+/// Inserts `tx`, returning the persisted row and whether this call actually
+/// performed the insert (`true`) or found it already committed by an earlier
+/// retry attempt (`false`).
 async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
-) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+) -> Result<(Transaction, bool)> {
+    let inserted = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
             settlement_id, memo, memo_type, metadata
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        -- The table is partitioned by created_at, so the primary key (and the
+        -- only conflict target Postgres accepts here) is (id, created_at).
+        ON CONFLICT (id, created_at) DO NOTHING
         RETURNING *
         "#,
     )
@@ -375,8 +393,22 @@ async fn persist_transaction(
     .bind(&tx.memo)
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
-    .fetch_one(&mut **db_tx)
-    .await
+    .fetch_optional(&mut **db_tx)
+    .await?;
+
+    match inserted {
+        Some(row) => Ok((row, true)),
+        None => {
+            let row = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE id = $1 AND created_at = $2",
+            )
+            .bind(tx.id)
+            .bind(tx.created_at)
+            .fetch_one(&mut **db_tx)
+            .await?;
+            Ok((row, false))
+        }
+    }
 }
 
 async fn audit_transaction_creation(
