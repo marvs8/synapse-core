@@ -62,6 +62,52 @@ impl<'a> Transactions<'a> {
     /// - [`SynapseError::Api`] – server returned another non-success status.
     /// - [`SynapseError::Http`] – network error.
     /// - [`SynapseError::Decode`] – response body is not valid JSON.
+    ///
+    /// # Example
+    ///
+    /// Fetch the first page, then follow `next_cursor`. An invalid or expired
+    /// cursor must be surfaced to the caller — never silently retried with the
+    /// same cursor:
+    ///
+    /// ```no_run
+    /// use synapse_sdk::{ListParams, SynapseClient, SynapseError};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let client = SynapseClient::new("https://api.example.com", "your-api-key");
+    ///
+    /// // First page: 50 records since the start of the year.
+    /// let first = client
+    ///     .transactions()
+    ///     .list(ListParams {
+    ///         limit: Some(50),
+    ///         from_date: Some("2024-01-01T00:00:00Z".to_string()),
+    ///         ..Default::default()
+    ///     })
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// for tx in &first.data {
+    ///     println!("{} {} {}", tx.id, tx.status, tx.amount);
+    /// }
+    ///
+    /// // Next page, only if the server issued a cursor.
+    /// if let Some(cursor) = first.meta.next_cursor {
+    ///     match client
+    ///         .transactions()
+    ///         .list(ListParams { cursor: Some(cursor), ..Default::default() })
+    ///         .await
+    ///     {
+    ///         Ok(next) => println!("page 2 has {} records", next.data.len()),
+    ///         // Surface this clearly and stop — do NOT retry the same cursor.
+    ///         Err(SynapseError::InvalidCursor(msg)) => {
+    ///             eprintln!("cursor rejected, restart pagination: {}", msg)
+    ///         }
+    ///         Err(e) => eprintln!("error: {}", e),
+    ///     }
+    /// }
+    /// # }
+    /// ```
     pub async fn list(&self, params: ListParams) -> Result<TransactionList, SynapseError> {
         let limit_str = params.limit.map(|l| l.to_string());
         let mut query: Vec<(&str, &str)> = Vec::new();
