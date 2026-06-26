@@ -8,6 +8,7 @@ pub mod retry;
 pub use client::{SynapseClient, SynapseClientBuilder};
 pub use error::SynapseError;
 pub use models::{ListParams, SearchParams, Transaction, TransactionList, TransactionSearch};
+pub use resources::events::{Events, TransactionStatusUpdate};
 pub use resources::graphql::GraphQL;
 pub use resources::transactions::Transactions;
 
@@ -20,5 +21,10 @@ impl SynapseClient {
     /// Access the `graphql` resource methods.
     pub fn graphql(&self) -> resources::graphql::GraphQL<'_> {
         resources::graphql::GraphQL { client: self }
+    }
+
+    /// Access the `events` resource methods.
+    pub fn events(&self) -> resources::events::Events<'_> {
+        resources::events::Events { client: self }
     }
 }
