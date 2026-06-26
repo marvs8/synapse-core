@@ -96,7 +96,7 @@ impl<'a> Transactions<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn transaction_body(id: &str) -> serde_json::Value {
@@ -159,6 +159,62 @@ mod tests {
         assert!(
             matches!(result, Err(SynapseError::NotFound(_))),
             "expected NotFound, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn list_returns_page_on_200() {
+        let server = MockServer::start().await;
+        let tx_id = "550e8400-e29b-41d4-a716-446655440000";
+
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .and(header("X-API-Key", "test-key"))
+            .and(query_param("limit", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [transaction_body(tx_id)],
+                "meta": { "next_cursor": "next-page-token", "has_more": true }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "test-key");
+        let params = ListParams {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let result = client.transactions().list(params).await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let page = result.unwrap();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].id, tx_id);
+        assert!(page.meta.has_more);
+        assert_eq!(page.meta.next_cursor.as_deref(), Some("next-page-token"));
+    }
+
+    #[tokio::test]
+    async fn list_returns_invalid_cursor_on_400() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .and(query_param("cursor", "bogus-cursor"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Invalid cursor: malformed"))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "test-key");
+        let params = ListParams {
+            cursor: Some("bogus-cursor".to_string()),
+            ..Default::default()
+        };
+        let result = client.transactions().list(params).await;
+
+        assert!(
+            matches!(result, Err(SynapseError::InvalidCursor(_))),
+            "expected InvalidCursor, got: {:?}",
             result
         );
     }
