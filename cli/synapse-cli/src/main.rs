@@ -226,31 +226,84 @@ enum TransactionsCmd {
 
 #[derive(Subcommand)]
 enum SettlementsCmd {
-    /// List settlements with cursor-based pagination
+    /// List settlements with cursor-based pagination.
+    ///
+    /// Retrieves a paginated list of settlements, starting from the most recent by default.
+    /// Use cursors to navigate pages - cursors are opaque and provided by the API response.
+    ///
+    /// Optional pagination flags:
+    /// - --cursor: Start from a specific position (obtained from a previous response)
+    /// - --limit: Number of results per page (1-100, default 10)
+    /// - --direction: forward (default, newest first) or backward (oldest first)
+    /// - --format: Output format - table (default) or json
+    ///
+    /// Example:
+    ///   synapse settlements list
+    ///   synapse settlements list --limit 50 --format json
+    ///   synapse settlements list --cursor <cursor-from-previous-response> --direction backward
+    #[command(about = "List settlements with cursor-based pagination")]
+    #[command(long_about = "List settlements with cursor-based pagination.\n\n\
+                             Retrieves a paginated list of settlements, starting from the most recent.\n\
+                             Use cursors to navigate pages - always use the cursor from the API response.\n\n\
+                             Optional flags:\n\n  \
+                             * --cursor: Start from a specific position (from previous response)\n  \
+                             * --limit: Number of results per page (1-100, default: 10)\n  \
+                             * --direction: forward (default, newest first) or backward (oldest first)\n  \
+                             * --format: Output format - table (default) or json")]
     List {
-        /// Pagination cursor
+        /// Pagination cursor from a previous response. Optional.
+        /// Cursors are opaque - never construct or modify them manually.
+        /// Always obtain cursors from the API response's next_cursor field.
         #[arg(long)]
         cursor: Option<String>,
 
-        /// Page size (1-100, default 10)
+        /// Number of results per page. Default: 10. Range: 1-100. Optional.
+        /// Larger limits retrieve more data in fewer requests but use more memory.
         #[arg(long, default_value = "10")]
         limit: i64,
 
-        /// Pagination direction (forward or backward)
+        /// Pagination direction. Default: forward. Optional.
+        /// Use 'forward' to retrieve settlements from newest to oldest (default).
+        /// Use 'backward' to retrieve settlements from oldest to newest.
         #[arg(long, default_value = "forward")]
         direction: String,
 
-        /// Output format (table or json)
+        /// Output format. Default: table. Optional.
+        /// Use 'table' for human-readable columnar output.
+        /// Use 'json' for complete JSON structure with all fields.
         #[arg(long, default_value = "table")]
         format: String,
     },
 
-    /// Get a specific settlement by ID
+    /// Get a specific settlement by ID.
+    ///
+    /// Retrieves detailed information about a settlement, including all fields
+    /// and metadata. The ID must be a valid UUID.
+    ///
+    /// Required arguments:
+    /// - settlement_id: The settlement UUID (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    ///
+    /// Optional flags:
+    /// - --format: Output format - table (default) or json
+    ///
+    /// Example:
+    ///   synapse settlements get 550e8400-e29b-41d4-a716-446655440000
+    ///   synapse settlements get 550e8400-e29b-41d4-a716-446655440000 --format json
+    #[command(about = "Get a specific settlement by ID")]
+    #[command(long_about = "Get a specific settlement by ID.\n\n\
+                             Retrieves detailed information about a settlement, including all fields.\n\n\
+                             Required:\n  \
+                             * settlement_id: The settlement UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)\n\n\
+                             Optional:\n  \
+                             * --format: Output format - table (default) or json")]
     Get {
-        /// Settlement UUID
+        /// Settlement UUID. Required.
+        /// Must be a valid UUID in format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         settlement_id: String,
 
-        /// Output format (table or json)
+        /// Output format. Default: table. Optional.
+        /// Use 'table' for human-readable key-value output.
+        /// Use 'json' for complete JSON structure with all fields.
         #[arg(long, default_value = "table")]
         format: String,
     },

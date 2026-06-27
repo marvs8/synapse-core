@@ -114,59 +114,128 @@ synapse transactions export --asset-code EUR --from 2024-01-01 > eur_export.csv
 
 #### List Settlements
 
-List settlements with cursor-based pagination.
+List settlements with cursor-based pagination. Settlements are ordered by creation date, most recent first (forward) or oldest first (backward).
 
 ```bash
 synapse settlements list [OPTIONS]
 ```
 
-**Options:**
-- `--cursor <CURSOR>`: Start from a specific cursor
-- `--limit <LIMIT>`: Number of results per page (1-100, default: 10)
-- `--direction <DIRECTION>`: Pagination direction - `forward` (default) or `backward`
-- `--format <FORMAT>`: Output format - `table` (default) or `json`
+**Options (all optional):**
+- `--cursor <CURSOR>`: Pagination cursor from a previous response. Cursors are opaque - always use the value from `next_cursor` in the API response.
+- `--limit <LIMIT>`: Results per page (1-100, default: 10). Larger limits retrieve more data in fewer requests.
+- `--direction <DIRECTION>`: Order direction - `forward` (default, newest first) or `backward` (oldest first)
+- `--format <FORMAT>`: Output format - `table` (default, human-readable) or `json` (complete JSON)
+
+**Sample Table Output:**
+```
+id: 550e8400-e29b-41d4-a716-446655440000 | status: completed | amount: 1500.00 | asset_code: USD | created_at: 2024-01-15T10:30:00Z
+550e8401-e29b-41d4-a716-446655440001 | status: pending | amount: 2500.50 | asset_code: EUR | created_at: 2024-01-15T09:15:00Z
+550e8402-e29b-41d4-a716-446655440002 | status: failed | amount: 500.00 | asset_code: GBP | created_at: 2024-01-14T23:45:00Z
+```
+
+**Sample JSON Output:**
+```json
+{
+  "settlements": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "status": "completed",
+      "amount": "1500.00",
+      "asset_code": "USD",
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T11:00:00Z"
+    },
+    {
+      "id": "550e8401-e29b-41d4-a716-446655440001",
+      "status": "pending",
+      "amount": "2500.50",
+      "asset_code": "EUR",
+      "created_at": "2024-01-15T09:15:00Z",
+      "updated_at": "2024-01-15T09:15:00Z"
+    }
+  ],
+  "next_cursor": "eyJpZCI6IjU1MGU4NDAyLWUyOWItNDFkNC1hNzE2LTQ0NjY1NTQ0MDAwMiIsImNyZWF0ZWRfYXQiOiIyMDI0LTAxLTE0VDIzOjQ1OjAwWiJ9",
+  "has_more": true
+}
+```
 
 **Examples:**
 
-List first 10 settlements:
+List first 10 settlements (default):
 ```bash
 synapse settlements list
 ```
 
-List 50 settlements in JSON format:
+List 50 most recent settlements in JSON:
 ```bash
 synapse settlements list --limit 50 --format json
 ```
 
-Navigate with cursor:
+List settlements in reverse chronological order (oldest first):
 ```bash
-synapse settlements list --cursor <cursor-from-previous-response> --limit 25
+synapse settlements list --direction backward --limit 25
+```
+
+Navigate to next page using cursor from previous response:
+```bash
+synapse settlements list --cursor <cursor-from-previous-response> --limit 10
 ```
 
 #### Get Settlement
 
-Get details of a specific settlement.
+Get detailed information about a specific settlement by UUID.
 
 ```bash
 synapse settlements get <SETTLEMENT_ID> [OPTIONS]
 ```
 
-**Arguments:**
-- `SETTLEMENT_ID`: The settlement UUID
+**Arguments (required):**
+- `SETTLEMENT_ID`: The settlement UUID (format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
 
-**Options:**
-- `--format <FORMAT>`: Output format - `table` (default) or `json`
+**Options (optional):**
+- `--format <FORMAT>`: Output format - `table` (default, key-value pairs) or `json` (complete JSON)
+
+**Sample Table Output:**
+```
+id: 550e8400-e29b-41d4-a716-446655440000
+status: completed
+amount: 1500.00
+asset_code: USD
+counterparty_account: GABC...
+created_at: 2024-01-15T10:30:00Z
+updated_at: 2024-01-15T11:00:00Z
+memo: Settlement for invoice #12345
+```
+
+**Sample JSON Output:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "amount": "1500.00",
+  "asset_code": "USD",
+  "counterparty_account": "GABC...",
+  "created_at": "2024-01-15T10:30:00Z",
+  "updated_at": "2024-01-15T11:00:00Z",
+  "memo": "Settlement for invoice #12345"
+}
+```
 
 **Examples:**
 
-Get settlement details in table format:
+Get settlement details in human-readable format:
 ```bash
 synapse settlements get 550e8400-e29b-41d4-a716-446655440000
 ```
 
-Get settlement details in JSON format:
+Get settlement details in JSON (useful for scripting):
 ```bash
 synapse settlements get 550e8400-e29b-41d4-a716-446655440000 --format json
+```
+
+Combine with jq for selective JSON fields:
+```bash
+synapse settlements get 550e8400-e29b-41d4-a716-446655440000 --format json | jq '.status, .amount, .asset_code'
 ```
 
 ## Output Formats
