@@ -1,4 +1,6 @@
 use crate::error::SynapseError;
+use crate::resources::settlements::Settlements;
+use crate::resources::transactions::Transactions;
 use crate::retry::{retry_with_backoff, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_ATTEMPTS};
 use serde::de::DeserializeOwned;
 
@@ -24,6 +26,17 @@ pub struct SynapseClientBuilder {
 }
 
 impl SynapseClient {
+    /// Construct a [`SynapseClient`] with default retry configuration.
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        SynapseClientBuilder {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            base_delay_ms: DEFAULT_BASE_DELAY_MS,
+        }
+        .build()
+    }
+
     /// Return a builder for constructing a [`SynapseClient`].
     pub fn builder(
         base_url: impl Into<String>,
@@ -35,6 +48,16 @@ impl SynapseClient {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             base_delay_ms: DEFAULT_BASE_DELAY_MS,
         }
+    }
+
+    /// Access the transactions resource.
+    pub fn transactions(&self) -> Transactions {
+        Transactions { client: self }
+    }
+
+    /// Access the settlements resource.
+    pub fn settlements(&self) -> Settlements {
+        Settlements { client: self }
     }
 
     /// Issue an authenticated GET request to `path` and deserialize the JSON response.
