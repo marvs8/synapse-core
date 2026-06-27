@@ -65,6 +65,36 @@ pub enum TxCommands {
     },
 
     /// Search transactions by filters
+    ///
+    /// Search for transactions using optional filters like status, asset code, amount range,
+    /// date range, and Stellar account. Results are paginated with cursor-based navigation.
+    ///
+    /// # Examples
+    ///
+    /// Search all pending transactions:
+    /// ```sh
+    /// synapse-core tx search --status pending
+    /// ```
+    ///
+    /// Search completed USD transactions with amount between 100 and 500:
+    /// ```sh
+    /// synapse-core tx search --status completed --asset-code USD --min-amount 100.00 --max-amount 500.00
+    /// ```
+    ///
+    /// Search transactions in a date range:
+    /// ```sh
+    /// synapse-core tx search --from 2024-01-01T00:00:00Z --to 2024-01-31T23:59:59Z
+    /// ```
+    ///
+    /// Get results as JSON:
+    /// ```sh
+    /// synapse-core tx search --status completed --format json
+    /// ```
+    ///
+    /// Use pagination cursor for next page:
+    /// ```sh
+    /// synapse-core tx search --cursor <cursor-from-previous-response>
+    /// ```
     Search {
         /// Transaction status (pending, processing, completed, failed)
         #[arg(long)]
