@@ -41,7 +41,15 @@ pub enum TxCommands {
         tx_id: Uuid,
     },
 
-    /// List transactions with optional pagination and date filters
+    #[command(long_about = "List transactions with cursor-based pagination and optional date filters.
+
+All flags are optional. Cursors are opaque — always use next_cursor from previous response.
+Invalid or expired cursors return an error and must not be retried as-is.
+
+Examples:
+  synapse-core tx list --limit 50
+  synapse-core tx list --from-date 2024-01-01T00:00:00Z --to-date 2024-02-01T00:00:00Z
+  synapse-core tx list --cursor <cursor> --format json")]
     List {
         /// Opaque pagination cursor (use next_cursor from previous response)
         #[arg(long)]
@@ -64,7 +72,15 @@ pub enum TxCommands {
         format: String,
     },
 
-    /// Search transactions by filter
+    #[command(long_about = "Search transactions by filter, returning a single page of matches.
+
+All filters are optional — omit a field to leave that dimension unfiltered.
+A search with no matches returns total=0 and empty results, not an error.
+
+Examples:
+  synapse-core tx search --status completed --asset-code USD
+  synapse-core tx search --min-amount 10.00 --max-amount 500.00
+  synapse-core tx search --stellar-account GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJIIAY3XDBKWV3UYSI7IFYWU4")]
     Search {
         /// Exact transaction status (e.g., pending, completed)
         #[arg(long)]
