@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod health;
 pub mod settlements;
 pub mod admin;
