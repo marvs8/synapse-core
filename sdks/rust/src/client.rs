@@ -1,3 +1,4 @@
+use crate::admin::AdminClient;
 use crate::error::SynapseError;
 use crate::resources::health::Health;
 use crate::resources::settlements::Settlements;
