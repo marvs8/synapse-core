@@ -87,12 +87,10 @@ pub enum SynapseError {
 
 impl SynapseError {
     /// Returns `true` if this error may resolve on a subsequent attempt.
-    ///
-    /// Network errors and 5xx HTTP responses are transient. 4xx responses are
-    /// permanent (they represent a caller mistake) and must not be retried.
     pub fn is_transient(&self) -> bool {
         match self {
             SynapseError::Network(_) => true,
+            SynapseError::Api { status, .. } => *status >= 500,
             SynapseError::Http { status, .. } => *status >= 500,
             SynapseError::Api { status, .. } => *status >= 500,
             SynapseError::NotFound(_)

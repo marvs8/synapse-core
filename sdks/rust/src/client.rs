@@ -17,6 +17,7 @@ pub struct SynapseClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
+    pub(crate) admin_key: Option<String>,
     pub(crate) max_attempts: u32,
     pub(crate) base_delay_ms: u64,
     pub(crate) catalog: Arc<OnceCell<HashMap<String, CatalogEntry>>>,
@@ -26,6 +27,7 @@ pub struct SynapseClient {
 pub struct SynapseClientBuilder {
     base_url: String,
     api_key: String,
+    admin_key: Option<String>,
     max_attempts: u32,
     base_delay_ms: u64,
 }
@@ -44,6 +46,7 @@ impl SynapseClient {
         SynapseClientBuilder {
             base_url: base_url.into(),
             api_key: api_key.into(),
+            admin_key: None,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             base_delay_ms: DEFAULT_BASE_DELAY_MS,
         }
@@ -455,6 +458,7 @@ impl SynapseClientBuilder {
             http: reqwest::Client::new(),
             base_url: self.base_url,
             api_key: self.api_key,
+            admin_key: self.admin_key,
             max_attempts: self.max_attempts,
             base_delay_ms: self.base_delay_ms,
             catalog: Arc::new(OnceCell::new()),
