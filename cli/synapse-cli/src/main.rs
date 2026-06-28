@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod output;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "synapse",
@@ -212,20 +214,12 @@ async fn handle_reconciliation(
         } => {
             let url = format!("{base_url}/admin/reconciliation/reports?limit={limit}&offset={offset}");
             let response = send_json_request::<ListReportsResponse>(client.get(url)).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&response)?);
-            } else {
-                print_reports(response);
-            }
+            println!("{}", output::render(&response, json, format_reports_table)?);
         }
         ReconciliationCommands::Report { report_id, json } => {
             let url = format!("{base_url}/admin/reconciliation/reports/{report_id}");
             let response = send_json_request::<ReportDetailResponse>(client.get(url)).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&response)?);
-            } else {
-                print_report(response);
-            }
+            println!("{}", output::render(&response, json, format_report_table)?);
         }
         ReconciliationCommands::Run {
             account,
@@ -240,11 +234,7 @@ async fn handle_reconciliation(
                 }),
             )
             .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&response)?);
-            } else {
-                print_run_response(response);
-            }
+            println!("{}", output::render(&response, json, format_run_table)?);
         }
     }
 
@@ -266,23 +256,30 @@ where
     serde_json::from_str(&body).context("failed to parse response JSON")
 }
 
-fn print_reports(response: ListReportsResponse) {
-    println!(
+fn format_reports_table(response: &ListReportsResponse) -> String {
+    let mut lines = vec![format!(
         "Reports: {} total (showing {} from offset {}, limit {})",
         response.total,
         response.reports.len(),
         response.offset,
         response.limit
-    );
+    )];
 
     if response.reports.is_empty() {
-        println!("No reconciliation reports found");
-        return;
+        lines.push("No reconciliation reports found".to_string());
+        return lines.join("\n");
     }
 
-    for report in response.reports {
-        println!(
-            "- {} | generated {} | period {} to {} | db {} | chain {} | discrepancies: {}",
+    lines.push(
+        "ID | Generated | Period Start | Period End | DB | Chain | Discrepancies".to_string(),
+    );
+    lines.push(
+        "-- | --------- | ------------ | ---------- | -- | ----- | -------------".to_string(),
+    );
+
+    for report in &response.reports {
+        lines.push(format!(
+            "{} | {} | {} | {} | {} | {} | {}",
             report.id,
             report.generated_at,
             report.period_start,
@@ -290,65 +287,58 @@ fn print_reports(response: ListReportsResponse) {
             report.total_db_transactions,
             report.total_chain_payments,
             yes_no(report.has_discrepancies)
-        );
+        ));
     }
+
+    lines.join("\n")
 }
 
-fn print_run_response(response: RunResponse) {
-    let report = response.report;
-
-    println!("{}", response.message);
-    println!();
-    println!("Report ID: {}", report.id);
-    println!("Generated: {}", report.generated_at);
-    println!(
-        "Period: {} to {}",
-        report.period_start, report.period_end
-    );
-    println!();
-    println!("Summary:");
-    println!("  Database transactions: {}", report.total_db_transactions);
-    println!("  Chain payments: {}", report.total_chain_payments);
-    println!("  Missing on chain: {}", report.missing_on_chain_count);
-    println!("  Orphaned payments: {}", report.orphaned_payments_count);
-    println!("  Amount mismatches: {}", report.amount_mismatches_count);
-    println!("  Has discrepancies: {}", yes_no(report.has_discrepancies));
-}
-
-fn print_report(report: ReportDetailResponse) {
-    println!("Report ID: {}", report.id);
-    println!("Generated: {}", report.generated_at);
-    println!(
-        "Period: {} to {}",
-        report.period_start, report.period_end
-    );
-    println!();
-    println!("Summary:");
-    println!("  Database transactions: {}", report.summary.total_db_transactions);
-    println!("  Chain payments: {}", report.summary.total_chain_payments);
-    println!(
-        "  Missing on chain: {}",
-        report.summary.missing_on_chain_count
-    );
-    println!(
-        "  Orphaned payments: {}",
-        report.summary.orphaned_payments_count
-    );
-    println!(
-        "  Amount mismatches: {}",
-        report.summary.amount_mismatches_count
-    );
-    println!("  Has discrepancies: {}", yes_no(report.summary.has_discrepancies));
+fn format_report_table(report: &ReportDetailResponse) -> String {
+    let mut lines = vec![
+        format!("Report ID: {}", report.id),
+        format!("Generated: {}", report.generated_at),
+        format!("Period: {} to {}", report.period_start, report.period_end),
+        String::new(),
+        "Summary:".to_string(),
+        format!("  Database transactions: {}", report.summary.total_db_transactions),
+        format!("  Chain payments: {}", report.summary.total_chain_payments),
+        format!("  Missing on chain: {}", report.summary.missing_on_chain_count),
+        format!("  Orphaned payments: {}", report.summary.orphaned_payments_count),
+        format!("  Amount mismatches: {}", report.summary.amount_mismatches_count),
+        format!("  Has discrepancies: {}", yes_no(report.summary.has_discrepancies)),
+    ];
 
     if report.missing_on_chain.is_empty()
         && report.orphaned_payments.is_empty()
         && report.amount_mismatches.is_empty()
     {
-        println!();
-        println!("No discrepancies found");
+        lines.push(String::new());
+        lines.push("No discrepancies found".to_string());
     }
+
+    lines.join("\n")
 }
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn format_run_table(response: &RunResponse) -> String {
+    let report = &response.report;
+    [
+        response.message.clone(),
+        String::new(),
+        format!("Report ID: {}", report.id),
+        format!("Generated: {}", report.generated_at),
+        format!("Period: {} to {}", report.period_start, report.period_end),
+        String::new(),
+        "Summary:".to_string(),
+        format!("  Database transactions: {}", report.total_db_transactions),
+        format!("  Chain payments: {}", report.total_chain_payments),
+        format!("  Missing on chain: {}", report.missing_on_chain_count),
+        format!("  Orphaned payments: {}", report.orphaned_payments_count),
+        format!("  Amount mismatches: {}", report.amount_mismatches_count),
+        format!("  Has discrepancies: {}", yes_no(report.has_discrepancies)),
+    ]
+    .join("\n")
 }

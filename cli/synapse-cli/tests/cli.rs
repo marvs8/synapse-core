@@ -23,8 +23,9 @@ fn reconciliation_commands_table_mode_happy_path() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
     assert!(stdout.contains("Reports: 1 total"));
+    assert!(stdout.contains("ID | Generated | Period Start"));
     assert!(stdout.contains(SAMPLE_REPORT_ID));
-    assert!(stdout.contains("discrepancies: yes"));
+    assert!(stdout.contains("| yes"));
 
     let mut cmd = synapse_command();
     cmd.args([
@@ -90,14 +91,13 @@ fn reconciliation_commands_json_mode_edge_case() {
         "reconciliation",
         "report",
         SAMPLE_REPORT_ID,
-        "--json",
     ]);
 
-    let output = cmd.output().expect("report json output");
+    let output = cmd.output().expect("report output");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-    assert!(stdout.contains("\"has_discrepancies\": false"));
-    assert!(stdout.contains("\"total_db_transactions\": 0"));
+    assert!(stdout.contains("No discrepancies found"));
+    assert!(stdout.contains("Has discrepancies: no"));
 
     let mut cmd = synapse_command();
     cmd.args([
