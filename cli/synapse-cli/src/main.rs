@@ -67,7 +67,10 @@ enum AdminCommands {
 
 #[derive(Subcommand, Debug)]
 enum LockCommands {
-    /// List active distributed locks held by this instance.
+    #[command(
+        about = "List active distributed locks",
+        long_about = "List active distributed locks currently held by this Synapse instance.\n\nRequired flags: none.\nOptional flags:\n  --json            Print the raw API response as pretty JSON instead of the default table.\n\nOutput fields:\n  resource          Protected resource name for the lock.\n  token             Lock owner token.\n  acquired_at       Unix timestamp, in seconds, when the lock was acquired.\n  ttl_secs          Lock TTL in seconds.\n  expected_duration_secs  Expected lock hold duration in seconds.\n  overdue           Whether the lock has exceeded twice its expected duration."
+    )]
     List {
         /// Print the raw API response as JSON.
         #[arg(long)]

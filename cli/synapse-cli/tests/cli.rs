@@ -155,6 +155,23 @@ fn locks_list_handles_empty_response_edge_case() {
 }
 
 #[test]
+fn locks_list_help_text_mentions_required_and_optional_flags() {
+    let output = synapse_command()
+        .args(["admin", "locks", "list", "--help"])
+        .output()
+        .expect("locks help output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+
+    assert!(stdout.contains("Required flags: none"));
+    assert!(stdout.contains("Optional flags:"));
+    assert!(stdout.contains("--json"));
+    assert!(stdout.contains("Output fields:"));
+    assert!(stdout.contains("resource"));
+    assert!(stdout.contains("overdue"));
+}
+
+#[test]
 fn run_help_text_mentions_required_and_optional_flags() {
     let output = synapse_command()
         .args(["admin", "reconciliation", "run", "--help"])
