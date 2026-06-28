@@ -1,4 +1,8 @@
-use crate::error::SynapseError;
+use crate::admin::AdminClient;
+use crate::error::{
+    map_status_to_error, parse_api_error, CatalogEntry, CatalogResponse, SynapseError,
+};
+use crate::resources::transactions::Transactions;
 use crate::retry::{retry_with_backoff, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_ATTEMPTS};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -15,6 +19,7 @@ pub struct SynapseClient {
     pub(crate) api_key: String,
     pub(crate) max_attempts: u32,
     pub(crate) base_delay_ms: u64,
+    pub(crate) catalog: Arc<OnceCell<HashMap<String, CatalogEntry>>>,
 }
 
 /// Builder for [`SynapseClient`].
@@ -85,10 +90,185 @@ impl SynapseClient {
                     let body = resp.text().await.unwrap_or_default();
                     return Err(SynapseError::Api { status, message: body });
                 }
-                resp.json::<T>().await.map_err(SynapseError::Network)
+                resp.json::<T>().await.map_err(|e| SynapseError::Decode(e.to_string()))
             }
         })
-        .await
+        .await;
+        match raw {
+            Err(SynapseError::Http { status, body }) => Err(self.map_api_error(status, body).await),
+            other => other,
+        }
+    }
+
+    /// Return a handle for the transactions resource.
+    pub fn transactions(&self) -> Transactions<'_> {
+        Transactions { client: self }
+    }
+
+    /// Return an [`AdminClient`] that authenticates with `admin_key` via
+    /// `Authorization: Bearer`, sharing the underlying HTTP connection pool.
+    pub fn as_admin(&self, admin_key: impl Into<String>) -> AdminClient {
+        AdminClient::new(
+            self.http.clone(),
+            self.base_url.clone(),
+            admin_key.into(),
+            self.max_attempts,
+            self.base_delay_ms,
+            Arc::clone(&self.catalog),
+        )
+    }
+
+    /// Fetch `/errors` on first call and return a reference to the cached catalog.
+    async fn ensure_catalog(&self) -> Option<&HashMap<String, CatalogEntry>> {
+        let http = self.http.clone();
+        let url = format!("{}/errors", self.base_url);
+        self.catalog
+            .get_or_try_init(|| async move {
+                let resp = http.get(&url).send().await?;
+                let body: CatalogResponse = resp.json().await?;
+                let map = body
+                    .errors
+                    .into_iter()
+                    .map(|e| (e.code.clone(), e))
+                    .collect();
+                Ok::<_, reqwest::Error>(map)
+            })
+            .await
+            .ok()
+    }
+
+    /// Translate a raw HTTP error into a typed [`SynapseError`] using the
+    /// lazily-fetched error catalog. Unknown codes fall back to [`SynapseError::Api`].
+    ///
+    /// Catalog descriptions are used only for named variants (401, 403, 404,
+    /// 429). For all other statuses the body message is preserved as-is so
+    /// that callers which inspect the message (e.g. cursor-error detection)
+    /// continue to work.
+    async fn map_api_error(&self, status: u16, body: String) -> SynapseError {
+        let (code, base_msg) = parse_api_error(&body);
+        let is_named = matches!(status, 401 | 403 | 404 | 429);
+        let description = if is_named {
+            match &code {
+                Some(c) => self
+                    .ensure_catalog()
+                    .await
+                    .and_then(|cat| cat.get(c))
+                    .map(|e| e.description.clone()),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let message = description.unwrap_or(base_msg);
+        map_status_to_error(status, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn catalog_body() -> serde_json::Value {
+        serde_json::json!({
+            "errors": [
+                {"code": "ERR_AUTH_001", "http_status": 401, "description": "Invalid authentication credentials"},
+                {"code": "ERR_NOT_FOUND_001", "http_status": 404, "description": "Resource not found"}
+            ],
+            "version": "1.0.0"
+        })
+    }
+
+    fn mount_catalog(server: &MockServer) -> impl std::future::Future<Output = ()> + '_ {
+        Mock::given(method("GET"))
+            .and(path("/errors"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(catalog_body()))
+            .mount(server)
+    }
+
+    #[tokio::test]
+    async fn maps_401_with_known_code_to_unauthorized() {
+        let server = MockServer::start().await;
+        mount_catalog(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/protected"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "Unauthorized",
+                "code": "ERR_AUTH_001",
+                "status": 401
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "bad-key");
+        let result: Result<serde_json::Value, _> = client.get("/protected").await;
+
+        assert!(
+            matches!(result, Err(SynapseError::Unauthorized(_))),
+            "expected Unauthorized, got: {:?}",
+            result
+        );
+        if let Err(SynapseError::Unauthorized(msg)) = result {
+            assert_eq!(msg, "Invalid authentication credentials", "should use catalog description");
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_404_with_known_code_to_not_found() {
+        let server = MockServer::start().await;
+        mount_catalog(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/things/missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "Not found",
+                "code": "ERR_NOT_FOUND_001",
+                "status": 404
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "key");
+        let result: Result<serde_json::Value, _> = client.get("/things/missing").await;
+
+        assert!(
+            matches!(result, Err(SynapseError::NotFound(_))),
+            "expected NotFound, got: {:?}",
+            result
+        );
+        if let Err(SynapseError::NotFound(msg)) = result {
+            assert_eq!(msg, "Resource not found", "should use catalog description");
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_unknown_code_to_api_fallback() {
+        let server = MockServer::start().await;
+        mount_catalog(&server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/things"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "Something unexpected",
+                "code": "ERR_UNKNOWN_999",
+                "status": 400
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "key");
+        let result: Result<serde_json::Value, _> = client.get("/things").await;
+
+        assert!(
+            matches!(result, Err(SynapseError::Api { status: 400, .. })),
+            "unknown code must fall back to Api, got: {:?}",
+            result
+        );
+        if let Err(SynapseError::Api { message, .. }) = result {
+            assert_eq!(message, "Something unexpected", "should use body message for unknown codes");
+        }
     }
 
     /// Issue an authenticated POST request with a JSON body.
@@ -177,6 +357,7 @@ impl SynapseClientBuilder {
             api_key: self.api_key,
             max_attempts: self.max_attempts,
             base_delay_ms: self.base_delay_ms,
+            catalog: Arc::new(OnceCell::new()),
         }
     }
 }
