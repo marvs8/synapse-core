@@ -5,6 +5,19 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
+#[derive(Debug, Deserialize)]
+struct BulkStatusResponse {
+    updated: usize,
+    failed: usize,
+    errors: Vec<BulkStatusError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BulkStatusError {
+    transaction_id: String,
+    error: String,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "synapse",
@@ -42,6 +55,34 @@ enum AdminCommands {
     /// Reconciliation reports and runs.
     #[command(subcommand)]
     Reconciliation(ReconciliationCommands),
+
+    /// Admin transaction management commands.
+    #[command(subcommand)]
+    Transactions(TransactionAdminCommands),
+}
+
+#[derive(Subcommand, Debug)]
+enum TransactionAdminCommands {
+    #[command(
+        about = "Bulk-update transaction statuses",
+        long_about = "Bulk-update the status of multiple transactions.\n\nRequired flags:\n  --ids <IDS>       Comma-separated transaction IDs to update.\n  --status <STATUS> New status to apply to every listed transaction.\nOptional flags:\n  --format <FORMAT> Output format: table (default) or json."
+    )]
+    BulkStatus(BulkStatusArgs),
+}
+
+#[derive(Args, Debug)]
+struct BulkStatusArgs {
+    /// Comma-separated transaction IDs to update.
+    #[arg(long, value_name = "IDS")]
+    ids: String,
+
+    /// New status to apply to every listed transaction.
+    #[arg(long, value_name = "STATUS")]
+    status: String,
+
+    /// Output format: table (default) or json.
+    #[arg(long, value_name = "FORMAT", default_value = "table")]
+    format: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -159,8 +200,59 @@ async fn main() -> Result<()> {
         Commands::Admin(AdminCommands::Reconciliation(command)) => {
             handle_reconciliation(&client, base_url, command).await?;
         }
+        Commands::Admin(AdminCommands::Transactions(command)) => {
+            handle_transaction_admin(&client, base_url, &cli.api_key, command).await?;
+        }
         Commands::Events(EventsCommands::Watch(args)) => {
             handle_events_watch(&client, base_url, &cli.api_key, args).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_transaction_admin(
+    client: &Client,
+    base_url: &str,
+    api_key: &str,
+    command: TransactionAdminCommands,
+) -> Result<()> {
+    match command {
+        TransactionAdminCommands::BulkStatus(args) => {
+            let ids = args
+                .ids
+                .split(',')
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>();
+
+            let body = serde_json::json!({
+                "transaction_ids": ids,
+                "status": args.status,
+            });
+
+            let mut request = client.post(format!("{base_url}/admin/transactions/bulk-status"));
+            if !api_key.is_empty() {
+                request = request.header("X-API-Key", api_key);
+            }
+
+            let response = request.json(&body).send().await.context("failed to bulk-update transaction status")?;
+            if !response.status().is_success() {
+                let body = response.text().await.unwrap_or_default();
+                bail!("bulk status update failed with {}: {}", response.status(), body);
+            }
+
+            let payload: BulkStatusResponse = response.json().await.context("failed to parse bulk status response")?;
+            let output_format = if args.format.eq_ignore_ascii_case("json") {
+                "json"
+            } else {
+                "table"
+            };
+
+            match output_format {
+                "json" => println!("{}", serde_json::to_string_pretty(&payload)?),
+                _ => println!("updated: {}\nfailed: {}", payload.updated, payload.failed),
+            }
         }
     }
 
