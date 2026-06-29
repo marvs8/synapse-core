@@ -168,6 +168,30 @@ fn route(request_line: &str, scenario: &str) -> String {
             json_response(200, &body)
         }
 
+        // ── Distributed locks ─────────────────────────────────────────────────
+        ("GET", "/admin/locks") => {
+            let body = if scenario == "edge" {
+                r#"{"active_locks":[],"total":0,"overdue":0}"#.to_string()
+            } else {
+                r#"{
+  "active_locks": [
+    {
+      "resource": "settlement:42",
+      "token": "tok-abc123",
+      "acquired_at": 1700000000,
+      "ttl_secs": 30,
+      "expected_duration_secs": 30,
+      "overdue": false
+    }
+  ],
+  "total": 1,
+  "overdue": 0
+}"#
+                .to_string()
+            };
+            json_response(200, &body)
+        }
+
         // ── Webhook endpoint health ───────────────────────────────────────────
         ("GET", "/admin/webhooks/health") => json_response(
             200,

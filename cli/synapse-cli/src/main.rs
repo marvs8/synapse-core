@@ -51,6 +51,13 @@ enum AdminCommands {
         long_about = "Inspect the health score of webhook endpoints through the admin API."
     )]
     Webhooks(WebhooksCommands),
+
+    /// Active distributed locks held by the server.
+    #[command(
+        about = "Distributed lock inspection",
+        long_about = "List all active distributed locks held by this server instance."
+    )]
+    Locks(LocksCommands),
 }
 
 // ── Reconciliation subcommands ────────────────────────────────────────────────
@@ -131,6 +138,21 @@ enum WebhooksCommands {
         #[arg(value_name = "ENDPOINT_ID")]
         endpoint_id: Uuid,
 
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// ── Locks subcommands ─────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+enum LocksCommands {
+    #[command(
+        about = "List active distributed locks",
+        long_about = "List all active distributed locks held by this server instance.\n\nOptional flags:\n  --json   Print the raw API response as JSON."
+    )]
+    List {
         /// Print the raw API response as JSON.
         #[arg(long)]
         json: bool,
@@ -234,6 +256,24 @@ struct WebhookHealthEntry {
     last_success_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct LockEntry {
+    resource: String,
+    token: String,
+    acquired_at: u64,
+    ttl_secs: u64,
+    expected_duration_secs: u64,
+    overdue: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct LocksListResponse {
+    #[serde(default)]
+    active_locks: Vec<LockEntry>,
+    total: usize,
+    overdue: usize,
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -249,6 +289,9 @@ async fn main() -> Result<()> {
             }
             AdminCommands::Webhooks(command) => {
                 handle_webhooks(&client, &base_url, command).await?
+            }
+            AdminCommands::Locks(command) => {
+                handle_locks(&client, &base_url, command).await?
             }
         },
     }
@@ -313,6 +356,21 @@ async fn handle_webhooks(
             let url = format!("{base_url}/admin/webhooks/health/{endpoint_id}");
             let response = send_json_request::<WebhookHealthEntry>(client.get(url)).await?;
             println!("{}", output::render(&response, json, format_webhook_health_entry)?);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_locks(
+    client: &reqwest::Client,
+    base_url: &str,
+    command: LocksCommands,
+) -> Result<()> {
+    match command {
+        LocksCommands::List { json } => {
+            let url = format!("{base_url}/admin/locks");
+            let response = send_json_request::<LocksListResponse>(client.get(url)).await?;
+            println!("{}", output::render(&response, json, format_locks_table)?);
         }
     }
     Ok(())
@@ -459,4 +517,32 @@ fn format_webhook_health_entry(entry: &WebhookHealthEntry) -> String {
         ),
     ]
     .join("\n")
+}
+
+fn format_locks_table(response: &LocksListResponse) -> String {
+    let mut lines = vec![format!(
+        "Active locks: {} total, {} overdue",
+        response.total, response.overdue
+    )];
+
+    if response.active_locks.is_empty() {
+        lines.push("No locks currently held.".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push("Resource | Token | Acquired At | TTL (s) | Overdue".to_string());
+    lines.push("-------- | ----- | ----------- | ------- | -------".to_string());
+
+    for lock in &response.active_locks {
+        lines.push(format!(
+            "{} | {} | {} | {} | {}",
+            lock.resource,
+            lock.token,
+            lock.acquired_at,
+            lock.ttl_secs,
+            yes_no(lock.overdue),
+        ));
+    }
+
+    lines.join("\n")
 }
