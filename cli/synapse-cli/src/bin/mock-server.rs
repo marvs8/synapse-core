@@ -1,17 +1,22 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 
-const ADDRESS: &str = "127.0.0.1:4010";
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
+const SAMPLE_ENDPOINT_ID: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 
 fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind(ADDRESS)?;
-    println!("Mock Synapse API listening on http://{ADDRESS}");
+    let addr = std::env::var("MOCK_SERVER_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:4010".to_string());
+    let scenario = std::env::var("MOCK_SERVER_SCENARIO")
+        .unwrap_or_else(|_| "happy".to_string());
+
+    let listener = TcpListener::bind(&addr)?;
+    eprintln!("Mock Synapse API listening on http://{addr} (scenario={scenario})");
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(err) = handle_connection(stream) {
+                if let Err(err) = handle_connection(stream, &scenario) {
                     eprintln!("mock server error: {err}");
                 }
             }
@@ -23,7 +28,6 @@ fn main() -> std::io::Result<()> {
 }
 
 fn handle_connection(stream: TcpStream, scenario: &str) -> std::io::Result<()> {
-fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -32,7 +36,7 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let response = route(request_line.trim_end());
+    let response = route(request_line.trim_end(), scenario);
     let mut stream = stream;
     stream.write_all(response.as_bytes())?;
     stream.flush()?;
@@ -40,12 +44,12 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
 }
 
 fn route(request_line: &str, scenario: &str) -> String {
-fn route(request_line: &str) -> String {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
 
     match (method, path) {
+        // ── Reconciliation ────────────────────────────────────────────────────
         ("POST", "/admin/reconciliation/run") => {
             let body = if scenario == "edge" {
                 r#"{
@@ -65,9 +69,6 @@ fn route(request_line: &str) -> String {
 }"#
             } else {
                 r#"{
-        ("POST", "/admin/reconciliation/run") => json_response(
-            200,
-            r#"{
   "message": "Reconciliation completed successfully",
   "report": {
     "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
@@ -83,31 +84,19 @@ fn route(request_line: &str) -> String {
   }
 }"#
             };
-
             json_response(200, body)
         }
-}"#,
-        ),
+
         ("GET", path) if path.starts_with("/admin/reconciliation/reports?") => {
-            let query = path.split_once('?').map(|(_, query)| query).unwrap_or_default();
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or_default();
             let params = parse_query(query);
-            let limit = params.get("limit").and_then(|value| value.parse::<i32>().ok()).unwrap_or(20);
-            let offset = params.get("offset").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
+            let limit = params.get("limit").and_then(|v| v.parse::<i32>().ok()).unwrap_or(20);
+            let offset = params.get("offset").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
 
             let body = if scenario == "edge" {
-                format!(
-                    r#"{{
-  "reports": [],
-  "total": 0,
-  "limit": {limit},
-  "offset": {offset}
-}}"#
-                )
+                format!(r#"{{"reports":[],"total":0,"limit":{limit},"offset":{offset}}}"#)
             } else {
                 format!(
-            json_response(
-                200,
-                &format!(
                     r#"{{
   "reports": [
     {{
@@ -129,11 +118,9 @@ fn route(request_line: &str) -> String {
 }}"#
                 )
             };
-
             json_response(200, &body)
-                ),
-            )
         }
+
         ("GET", path) if path.starts_with("/admin/reconciliation/reports/") => {
             let report_id = path.rsplit('/').next().unwrap_or(SAMPLE_REPORT_ID);
 
@@ -159,9 +146,6 @@ fn route(request_line: &str) -> String {
                 )
             } else {
                 format!(
-            json_response(
-                200,
-                &format!(
                     r#"{{
   "id": "{report_id}",
   "generated_at": "2026-06-27T06:10:12Z",
@@ -181,17 +165,48 @@ fn route(request_line: &str) -> String {
 }}"#
                 )
             };
-
             json_response(200, &body)
-                ),
-            )
         }
-        _ => json_response(
-            404,
-            r#"{
-  "error": "Not found"
-}"#,
+
+        // ── Webhook endpoint health ───────────────────────────────────────────
+        ("GET", "/admin/webhooks/health") => json_response(
+            200,
+            &format!(
+                r#"[
+  {{
+    "id": "{SAMPLE_ENDPOINT_ID}",
+    "url": "https://example.com/webhook",
+    "enabled": true,
+    "success_rate": 99.5,
+    "total_deliveries": 200,
+    "last_success_at": "2026-06-29T10:00:00Z"
+  }}
+]"#
+            ),
         ),
+
+        ("GET", path) if path.starts_with("/admin/webhooks/health/") => {
+            let id = path.trim_start_matches("/admin/webhooks/health/");
+            if id == SAMPLE_ENDPOINT_ID {
+                json_response(
+                    200,
+                    &format!(
+                        r#"{{
+  "id": "{SAMPLE_ENDPOINT_ID}",
+  "url": "https://example.com/webhook",
+  "enabled": true,
+  "success_rate": 99.5,
+  "total_deliveries": 200,
+  "last_success_at": "2026-06-29T10:00:00Z"
+}}"#
+                    ),
+                )
+            } else {
+                json_response(404, r#"{"error":"Endpoint not found"}"#)
+            }
+        }
+
+        _ => json_response(404, r#"{"error":"Not found"}"#),
     }
 }
 
@@ -202,7 +217,6 @@ fn json_response(status: u16, body: &str) -> String {
         500 => "Internal Server Error",
         _ => "OK",
     };
-
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -213,6 +227,6 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
-        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
