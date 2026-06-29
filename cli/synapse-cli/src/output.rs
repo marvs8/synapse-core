@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde::Serialize;
 
+/// Render a value as either pretty-printed JSON or a table string produced by
+/// the provided `table_renderer` closure.
 pub fn render<T, F>(value: &T, json: bool, table_renderer: F) -> Result<String>
 where
     T: Serialize,
@@ -10,16 +12,20 @@ where
         Ok(serde_json::to_string_pretty(value)?)
     } else {
         Ok(table_renderer(value))
-use serde::Serialize;
-use std::fmt::Display;
+    }
+}
 
-pub fn format_output<T: Serialize + Display>(data: T, json: bool) {
+/// Format and print a serializable value to stdout.
+pub fn format_output<T: Serialize>(data: &T, json: bool) {
     if json {
-        match serde_json::to_string(&data) {
+        match serde_json::to_string_pretty(data) {
             Ok(output) => println!("{}", output),
             Err(e) => eprintln!("Failed to serialize as JSON: {}", e),
         }
     } else {
-        println!("{}", data);
+        match serde_json::to_value(data) {
+            Ok(v) => println!("{}", v),
+            Err(e) => eprintln!("Failed to format output: {}", e),
+        }
     }
 }

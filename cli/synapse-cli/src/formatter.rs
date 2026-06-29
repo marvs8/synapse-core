@@ -95,7 +95,7 @@ impl Formatter {
 
     fn format_object_as_table(obj: &serde_json::Map<String, Value>) -> String {
         let mut rows = Vec::new();
-        let mut map: BTreeMap<&String, &Value> = obj.iter().collect();
+        let map: BTreeMap<&String, &Value> = obj.iter().collect();
 
         for (key, value) in map {
             rows.push(format!("{}: {}", key, format_value(value)));
@@ -119,38 +119,47 @@ fn format_value(value: &Value) -> String {
         }
         Value::Array(arr) => format!("[{} items]", arr.len()),
         Value::Object(obj) => format!("{{{} fields}}", obj.len()),
-use serde_json::{json, Value};
-
-/// Formats output as either table or JSON.
-pub struct Formatter;
-
-impl Formatter {
-    /// Format a transaction for table display.
-    pub fn format_transaction_table(tx: &Value) -> String {
-        let id = tx.get("id").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let status = tx.get("status").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let amount = tx.get("amount").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let asset_code = tx
-            .get("asset_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("N/A");
-
-        format!(
-            "ID\t{}\nStatus\t{}\nAmount\t{}\nAsset\t{}\n",
-            id, status, amount, asset_code
-        )
     }
+}
 
-    /// Format a transaction for JSON display.
-    pub fn format_transaction_json(tx: &Value) -> String {
-        serde_json::to_string_pretty(tx).unwrap_or_else(|_| "{}".to_string())
+/// Trait for types that can render themselves as a table row.
+pub trait TableDisplay: serde::Serialize {
+    fn headers() -> Vec<&'static str>;
+    fn row(&self) -> Vec<String>;
+}
+
+/// Print a slice of table-displayable items to stdout.
+pub fn print<T: TableDisplay>(items: &[T], fmt: OutputFormat) {
+    match fmt {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            if items.is_empty() {
+                println!("(empty)");
+                return;
+            }
+            let headers = T::headers();
+            println!("{}", headers.join(" | "));
+            println!("{}", "-".repeat(80));
+            for item in items {
+                println!("{}", item.row().join(" | "));
+            }
+        }
     }
+}
 
-    /// Format output based on the requested format.
-    pub fn format(format: &str, data: &Value) -> String {
-        match format {
-            "json" => Self::format_transaction_json(data),
-            "table" | _ => Self::format_transaction_table(data),
+/// Print a single serializable item to stdout.
+pub fn print_one<T: serde::Serialize>(item: &T, fmt: OutputFormat) {
+    match fmt {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let v = serde_json::to_value(item).unwrap_or(Value::Null);
+            println!("{}", Formatter::format_as_table(&v));
         }
     }
 }

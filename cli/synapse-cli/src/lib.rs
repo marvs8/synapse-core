@@ -1,9 +1,9 @@
+pub mod client;
 pub mod commands;
 pub mod formatter;
-pub mod client;
 
-pub use formatter::{OutputFormat, Formatter};
-pub use client::SynapseCliClient;
+pub use client::{ApiClient, SynapseCliClient};
+pub use formatter::{print, print_one, Formatter, OutputFormat, TableDisplay};
 
 #[derive(Debug)]
 pub struct CliConfig {
