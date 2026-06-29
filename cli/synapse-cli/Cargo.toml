@@ -5,7 +5,7 @@ edition = "2021"
 
 [[bin]]
 name = "synapse"
-path = "src/main.rs"
+path = "src/cli_main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -20,6 +20,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 csv = "1"
+urlencoding = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

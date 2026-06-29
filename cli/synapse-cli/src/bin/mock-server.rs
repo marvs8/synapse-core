@@ -134,6 +134,22 @@ fn route(request_line: &str) -> String {
                 ),
             )
         }
+        ("GET", path) if path.starts_with("/events/watch") => {
+            let body = r#"[
+  {
+    "transaction_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "completed",
+    "timestamp": "2024-01-15T10:30:00Z",
+    "message": "Settlement finalized"
+  },
+  {
+    "transaction_id": "550e8401-e29b-41d4-a716-446655440001",
+    "status": "pending",
+    "timestamp": "2024-01-15T10:31:00Z"
+  }
+]"#;
+            json_response(200, body)
+        }
         ("GET", path) if path.starts_with("/admin/reconciliation/reports/") => {
             let report_id = path.rsplit('/').next().unwrap_or(SAMPLE_REPORT_ID);
 

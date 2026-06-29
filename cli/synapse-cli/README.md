@@ -51,6 +51,28 @@ synapse --base-url https://api.synapse.example.com --api-key your-key transactio
 
 ## Commands
 
+### Events
+
+#### Watch transaction events
+
+Stream transaction status updates from the Synapse API. The command requires a token and accepts optional limits and JSON output.
+
+```bash
+synapse events watch --token demo-token --limit 2
+```
+
+Example output:
+```text
+550e8400-e29b-41d4-a716-446655440000 | completed | 2024-01-15T10:30:00Z | Settlement finalized
+550e8401-e29b-41d4-a716-446655440001 | pending | 2024-01-15T10:31:00Z
+```
+
+This example is copy-paste runnable against the mock server when you start the CLI with a base URL that points to the mock server, for example:
+
+```bash
+cargo run --bin synapse -- --base-url http://127.0.0.1:4010 events watch --token demo-token --limit 2
+```
+
 ### Transactions
 
 #### Export Transactions
