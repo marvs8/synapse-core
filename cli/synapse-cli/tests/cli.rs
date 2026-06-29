@@ -1,10 +1,11 @@
 use assert_cmd::Command;
 use std::net::TcpListener;
-use std::process::{Child, Command as StdCommand, Stdio};
+use std::process::{Child, Stdio};
 use std::thread;
 use std::time::Duration;
 
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
+const SAMPLE_SETTLEMENT_ID: &str = "8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11";
 
 #[test]
 fn reconciliation_commands_table_mode_happy_path() {
@@ -119,6 +120,79 @@ fn reconciliation_commands_json_mode_edge_case() {
     assert!(stdout.contains("\"total_db_transactions\": 0"));
 }
 
+#[test]
+fn settlement_update_status_help_mentions_required_and_optional_flags() {
+    let mut cmd = synapse_command();
+    cmd.args(["admin", "settlements", "update-status", "--help"]);
+
+    let output = cmd.output().expect("help output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+
+    assert!(stdout.contains("Required arguments:"));
+    assert!(stdout.contains("<SETTLEMENT_ID>"));
+    assert!(stdout.contains("Required flags:"));
+    assert!(stdout.contains("--status <STATUS>"));
+    assert!(stdout.contains("Optional flags:"));
+    assert!(stdout.contains("--new-total <TOTAL>"));
+    assert!(stdout.contains("--actor <ACTOR>"));
+}
+
+#[test]
+fn settlement_update_status_table_and_json_modes() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "settlements",
+        "update-status",
+        SAMPLE_SETTLEMENT_ID,
+        "--status",
+        "adjusted",
+        "--reason",
+        "Audit correction",
+        "--new-total",
+        "125.0000000",
+    ]);
+
+    let output = cmd.output().expect("settlement output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("Settlement updated successfully"));
+    assert!(stdout.contains("Settlement ID: 8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11"));
+    assert!(stdout.contains("Status: adjusted"));
+    assert!(stdout.contains("Dispute reason: Audit correction"));
+    assert!(stdout.contains("Original total amount: 130.0000000"));
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "settlements",
+        "update-status",
+        SAMPLE_SETTLEMENT_ID,
+        "--status",
+        "adjusted",
+        "--reason",
+        "Audit correction",
+        "--new-total",
+        "125.0000000",
+        "--json",
+    ]);
+
+    let output = cmd.output().expect("settlement json output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"status\": \"adjusted\""));
+    assert!(stdout.contains("\"original_total_amount\": \"130.0000000\""));
+    assert!(stdout.contains("\"reviewed_by\": \"admin\""));
+}
+
 fn synapse_command() -> Command {
     Command::cargo_bin("synapse").expect("synapse binary exists")
 }
@@ -131,9 +205,8 @@ struct MockServer {
 impl MockServer {
     fn spawn(scenario: &str) -> Self {
         let port = free_port();
-        let binary = std::env::var_os("CARGO_BIN_EXE_mock-server")
-            .expect("mock-server binary path");
-        let child = StdCommand::new(binary)
+        let child = Command::cargo_bin("mock-server")
+            .expect("mock-server binary exists")
             .env("MOCK_SERVER_ADDR", format!("127.0.0.1:{port}"))
             .env("MOCK_SERVER_SCENARIO", scenario)
             .stdin(Stdio::null())

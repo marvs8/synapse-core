@@ -44,6 +44,13 @@ enum AdminCommands {
         long_about = "List, inspect, or run reconciliation reports through the admin API."
     )]
     Reconciliation(ReconciliationCommands),
+
+    /// Settlement status management.
+    #[command(
+        about = "Settlement status management",
+        long_about = "Update settlement status through the admin API."
+    )]
+    Settlements(SettlementCommands),
 }
 
 #[derive(Subcommand, Debug)]
@@ -92,6 +99,39 @@ enum ReconciliationCommands {
         /// Hours of history to include.
         #[arg(long, value_name = "HOURS")]
         period_hours: Option<u32>,
+
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SettlementCommands {
+    #[command(
+        about = "Update a settlement's status",
+        long_about = "Update a settlement's status through the admin API and print the updated settlement.\n\nRequired arguments:\n  <SETTLEMENT_ID>        UUID of the settlement to update.\nRequired flags:\n  --status <STATUS>      New status to apply (pending, completed, pending_review, disputed, adjusted, or voided).\nOptional flags:\n  --reason <REASON>      Human-readable reason for the change.\n  --new-total <TOTAL>    Replacement total amount; only meaningful when setting status to adjusted.\n  --actor <ACTOR>        Actor recorded in the audit log (default: admin).\n  --json                 Print the raw API response as JSON."
+    )]
+    UpdateStatus {
+        /// UUID of the settlement to update.
+        #[arg(value_name = "SETTLEMENT_ID")]
+        settlement_id: Uuid,
+
+        /// New status to apply.
+        #[arg(long, value_name = "STATUS")]
+        status: String,
+
+        /// Human-readable reason for the change.
+        #[arg(long, value_name = "REASON")]
+        reason: Option<String>,
+
+        /// Replacement total amount; only meaningful when setting status to adjusted.
+        #[arg(long = "new-total", value_name = "TOTAL")]
+        new_total: Option<String>,
+
+        /// Actor recorded in the audit log.
+        #[arg(long, value_name = "ACTOR", default_value = "admin")]
+        actor: String,
 
         /// Print the raw API response as JSON.
         #[arg(long)]
@@ -184,6 +224,31 @@ struct RunRequest<'a> {
     period_hours: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct SettlementResponse {
+    id: Uuid,
+    asset_code: String,
+    total_amount: String,
+    tx_count: i32,
+    period_start: String,
+    period_end: String,
+    status: String,
+    created_at: String,
+    updated_at: String,
+    dispute_reason: Option<String>,
+    original_total_amount: Option<String>,
+    reviewed_by: Option<String>,
+    reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateSettlementStatusRequest<'a> {
+    status: &'a str,
+    reason: Option<&'a str>,
+    new_total: Option<&'a str>,
+    actor: &'a str,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -194,6 +259,9 @@ async fn main() -> Result<()> {
         Commands::Admin(admin) => match admin {
             AdminCommands::Reconciliation(command) => {
                 handle_reconciliation(&client, &base_url, command).await?
+            }
+            AdminCommands::Settlements(command) => {
+                handle_settlement(&client, &base_url, command).await?
             }
         },
     }
@@ -235,6 +303,37 @@ async fn handle_reconciliation(
             )
             .await?;
             println!("{}", output::render(&response, json, format_run_table)?);
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_settlement(
+    client: &reqwest::Client,
+    base_url: &str,
+    command: SettlementCommands,
+) -> Result<()> {
+    match command {
+        SettlementCommands::UpdateStatus {
+            settlement_id,
+            status,
+            reason,
+            new_total,
+            actor,
+            json,
+        } => {
+            let url = format!("{base_url}/admin/settlements/{settlement_id}/status");
+            let response = send_json_request::<SettlementResponse>(
+                client.patch(url).json(&UpdateSettlementStatusRequest {
+                    status: &status,
+                    reason: reason.as_deref(),
+                    new_total: new_total.as_deref(),
+                    actor: &actor,
+                }),
+            )
+            .await?;
+            println!("{}", output::render(&response, json, format_settlement_table)?);
         }
     }
 
@@ -339,6 +438,44 @@ fn format_run_table(response: &RunResponse) -> String {
         format!("  Orphaned payments: {}", report.orphaned_payments_count),
         format!("  Amount mismatches: {}", report.amount_mismatches_count),
         format!("  Has discrepancies: {}", yes_no(report.has_discrepancies)),
+    ]
+    .join("\n")
+}
+
+fn format_settlement_table(settlement: &SettlementResponse) -> String {
+    [
+        "Settlement updated successfully".to_string(),
+        String::new(),
+        format!("Settlement ID: {}", settlement.id),
+        format!("Asset code: {}", settlement.asset_code),
+        format!("Status: {}", settlement.status),
+        format!("Total amount: {}", settlement.total_amount),
+        format!("Tx count: {}", settlement.tx_count),
+        format!("Period: {} to {}", settlement.period_start, settlement.period_end),
+        format!(
+            "Dispute reason: {}",
+            settlement
+                .dispute_reason
+                .as_deref()
+                .unwrap_or("not provided")
+        ),
+        format!(
+            "Original total amount: {}",
+            settlement
+                .original_total_amount
+                .as_deref()
+                .unwrap_or("not provided")
+        ),
+        format!(
+            "Reviewed by: {}",
+            settlement.reviewed_by.as_deref().unwrap_or("not provided")
+        ),
+        format!(
+            "Reviewed at: {}",
+            settlement.reviewed_at.as_deref().unwrap_or("not provided")
+        ),
+        format!("Created at: {}", settlement.created_at),
+        format!("Updated at: {}", settlement.updated_at),
     ]
     .join("\n")
 }

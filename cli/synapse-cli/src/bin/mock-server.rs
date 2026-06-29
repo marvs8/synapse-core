@@ -170,6 +170,52 @@ fn route(request_line: &str, scenario: &str) -> String {
 
             json_response(200, &body)
         }
+        ("PATCH", path) if path.starts_with("/admin/settlements/") && path.ends_with("/status") => {
+            let settlement_id = path
+                .trim_start_matches("/admin/settlements/")
+                .trim_end_matches("/status")
+                .trim_end_matches('/');
+
+            let body = if scenario == "edge" {
+                format!(
+                    r#"{{
+  "id": "{settlement_id}",
+  "asset_code": "USDC",
+  "total_amount": "125.0000000",
+  "tx_count": 8,
+  "period_start": "2026-06-26T00:00:00Z",
+  "period_end": "2026-06-27T00:00:00Z",
+  "status": "voided",
+  "created_at": "2026-06-27T09:00:00Z",
+  "updated_at": "2026-06-27T09:15:00Z",
+  "dispute_reason": "Manual review requested",
+  "original_total_amount": "130.0000000",
+  "reviewed_by": "admin",
+  "reviewed_at": "2026-06-27T09:15:00Z"
+}}"#
+                )
+            } else {
+                format!(
+                    r#"{{
+  "id": "{settlement_id}",
+  "asset_code": "USDC",
+  "total_amount": "125.0000000",
+  "tx_count": 8,
+  "period_start": "2026-06-26T00:00:00Z",
+  "period_end": "2026-06-27T00:00:00Z",
+  "status": "adjusted",
+  "created_at": "2026-06-27T09:00:00Z",
+  "updated_at": "2026-06-27T09:15:00Z",
+  "dispute_reason": "Audit correction",
+  "original_total_amount": "130.0000000",
+  "reviewed_by": "admin",
+  "reviewed_at": "2026-06-27T09:15:00Z"
+}}"#
+                )
+            };
+
+            json_response(200, &body)
+        }
         _ => json_response(
             404,
             r#"{
