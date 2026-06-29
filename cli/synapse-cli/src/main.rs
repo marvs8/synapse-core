@@ -444,10 +444,12 @@ enum Commands {
     Settlements {
         #[command(subcommand)]
         command: SettlementsCmd,
-    /// Manage transactions
-    Transactions {
+    },
+
+    /// Real-time event streaming commands
+    Events {
         #[command(subcommand)]
-        command: TransactionCommand,
+        command: synapse_cli::commands::events::EventsSubcommand,
     },
 }
 
@@ -684,6 +686,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Settlements { command } => {
             handlers::handle_settlements(command, &config, output_format).await?
+        }
+        Commands::Events { command } => {
+            synapse_cli::commands::events::handle_events(
+                synapse_cli::commands::events::EventsCmd { command },
+                &config.base_url,
+            )
+            .await?
         }
     }
 

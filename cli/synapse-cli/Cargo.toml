@@ -20,6 +20,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 csv = "1"
+tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 assert_cmd = "2"
