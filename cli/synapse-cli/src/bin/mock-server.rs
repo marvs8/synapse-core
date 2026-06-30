@@ -5,6 +5,10 @@ const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
 const SAMPLE_LOCK_TOKEN: &str = "4e4e9e47-7e0f-4f2f-8d63-323c61279209";
 
 fn main() -> std::io::Result<()> {
+    let addr = std::env::var("MOCK_SERVER_ADDR").unwrap_or_else(|_| ADDRESS.to_string());
+    let scenario = std::env::var("MOCK_SERVER_SCENARIO").unwrap_or_else(|_| "happy".to_string());
+    let listener = TcpListener::bind(&addr)?;
+    println!("Mock Synapse API listening on http://{addr}");
     let addr = std::env::var("MOCK_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:4010".to_string());
     let scenario = std::env::var("MOCK_SERVER_SCENARIO").unwrap_or_else(|_| "happy".to_string());
     let listener = TcpListener::bind(addr)?;
@@ -12,6 +16,8 @@ fn main() -> std::io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if let Err(err) = handle_connection(stream, &scenario) {
+                    eprintln!("mock server error: {err}");
                 if let Err(error) = handle_connection(stream, &scenario) {
                     eprintln!("mock server error: {error}");
                 }
@@ -27,6 +33,10 @@ fn handle_connection(stream: TcpStream, scenario: &str) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
+
+    if request_line.is_empty() {
+        return Ok(());
+    }
 
     let response = route(request_line.trim_end(), scenario);
     let mut stream = stream;
@@ -45,6 +55,24 @@ fn route(request_line: &str, scenario: &str) -> String {
             if scenario == "edge" {
                 json_response(200, &run_body(false, 0, 0))
             } else {
+                r#"{
+  "message": "Reconciliation completed successfully",
+  "report": {
+    "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
+    "generated_at": "2026-06-27T06:10:12Z",
+    "period_start": "2026-06-26T06:10:12Z",
+    "period_end": "2026-06-27T06:10:12Z",
+    "total_db_transactions": 12,
+    "total_chain_payments": 11,
+    "missing_on_chain_count": 1,
+    "orphaned_payments_count": 0,
+    "amount_mismatches_count": 1,
+    "has_discrepancies": true
+  }
+}"#
+            };
+
+            json_response(200, body)
                 json_response(200, &run_body(true, 12, 11))
             }
         }
@@ -69,6 +97,22 @@ fn route(request_line: &str, scenario: &str) -> String {
                     &format!(r#"{{"reports":[],"total":0,"limit":{limit},"offset":{offset}}}"#),
                 )
             } else {
+                format!(
+                    r#"{{
+  "reports": [
+    {{
+      "id": "{SAMPLE_REPORT_ID}",
+      "generated_at": "2026-06-27T06:10:12Z",
+      "period_start": "2026-06-26T06:10:12Z",
+      "period_end": "2026-06-27T06:10:12Z",
+      "total_db_transactions": 12,
+      "total_chain_payments": 11,
+      "missing_on_chain_count": 1,
+      "orphaned_payments_count": 0,
+      "amount_mismatches_count": 1,
+      "has_discrepancies": true
+    }}
+  ],
                 json_response(
                     200,
                     &format!(
@@ -81,6 +125,46 @@ fn route(request_line: &str, scenario: &str) -> String {
                         report_summary(true, 12, 11)
                     ),
                 )
+            };
+
+            json_response(200, &body)
+        }
+        ("GET", path) if path.starts_with("/events/watch") => {
+            let body = r#"[
+  {
+    "transaction_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "completed",
+    "timestamp": "2024-01-15T10:30:00Z",
+    "message": "Settlement finalized"
+  },
+  {
+    "transaction_id": "550e8401-e29b-41d4-a716-446655440001",
+    "status": "pending",
+    "timestamp": "2024-01-15T10:31:00Z"
+  }
+]"#;
+            json_response(200, body)
+        }
+        ("POST", "/admin/transactions/bulk-status") => {
+            let body = if scenario == "edge" {
+                r#"{
+  "updated": 1,
+  "failed": 1,
+  "errors": [
+    {
+      "transaction_id": "550e8400-e29b-41d4-a716-446655440001",
+      "error": "status transition not allowed"
+    }
+  ]
+}"#
+            } else {
+                r#"{
+  "updated": 2,
+  "failed": 0,
+  "errors": []
+}"#
+            };
+            json_response(200, body)
             }
         }
 
@@ -129,6 +213,10 @@ fn report_summary(has_discrepancies: bool, db: i32, chain: i32) -> String {
   "amount_mismatches_count": {mismatch},
   "has_discrepancies": {has_discrepancies}
 }}"#
+                )
+            } else {
+                format!(
+                    r#"{{
     )
 }
 
@@ -156,6 +244,12 @@ fn report_detail(report_id: &str, has_discrepancies: bool, db: i32, chain: i32) 
     )
 }
 
+            json_response(200, &body)
+        }
+        _ => json_response(404, r#"{
+  "error": "Not found"
+}"#),
+    }
 fn locks_body() -> String {
     format!(
         r#"{{

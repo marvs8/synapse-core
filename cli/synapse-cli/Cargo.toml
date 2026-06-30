@@ -7,7 +7,7 @@ edition = "2021"
 
 [[bin]]
 name = "synapse"
-path = "src/main.rs"
+path = "src/cli_main.rs"
 
 [lib]
 name = "synapse_cli"
